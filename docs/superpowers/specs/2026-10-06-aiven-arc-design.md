@@ -126,6 +126,14 @@ break multi-step tool use on these models.
 arguments are returned to the model as a tool error so it can correct itself. A
 dropped stream mid-turn is reported and the partial turn is kept, not discarded.
 
+**Narration.** The loop emits two plain-language event kinds besides raw tool
+events, so the UI can show progress without showing code: `status` (`idle`,
+`thinking`, `working`, `waiting-approval`, `waiting-answer`, with a short label)
+and `activity` (one per tool call: phase, plain-language label, and state
+`running`, `done`, `failed` or `denied`). Labels are produced by a pure
+`describeCall`/`describeResult` module, are at most 80 characters, and contain
+no code, so the header and activity feed never need to render raw output.
+
 **Interrupt.** Esc aborts the in-flight request and any running Bash process tree
 (SIGTERM, then SIGKILL after 2 seconds).
 
@@ -308,22 +316,64 @@ ideas and an existing repo gets "find and fix the flakiest test").
 
 ## 8. Claude-Code-style UX
 
+**Principle: a bot that shows progress, not code.** The default view is calm and
+reads like a colleague reporting what it is doing. Raw code, diffs and command
+output exist but stay collapsed behind "Details" until the user asks for them.
+
+### 8.1 Layout
+
+- **Left sidebar** (collapsible, Cmd+B): project switcher and session list.
+- **Centre:** one conversation column (about 760px wide) with generous whitespace.
+- **Bottom:** the composer, pinned, with a slim status line beneath it (mode chip,
+  model chip, context meter).
+- **No right sidebar.** Everything that would live there (plan, changed files,
+  session info) lives in the header.
+
+### 8.2 Header (in-window, slim, 52px)
+
+- **Left:** sidebar toggle, project name and git branch.
+- **Centre, the progress pill:** one line of plain language saying what the agent
+  is doing right now ("Reading the project", "Editing 3 files", "Running the
+  tests", "Waiting for you"), a live dot, and a thin progress bar fed by the todo
+  list ("3 of 7"). Click it to open the **Plan** popover (the todo list).
+- **Right:** **Changes** button (file count; popover lists files with added and
+  removed line counts, review and Undo), **Mode** chip (`ASK`, `AUTO-EDIT`, `AUTO`;
+  click to switch, Auto asks for confirmation), **Spark** button (prompter ideas),
+  settings.
+
+### 8.3 Transcript: activity first, details on demand
+
+- The assistant's chat text is short and plain. The system prompt tells the model
+  to report progress in a sentence or two and not to paste code or command output
+  into chat unless the user asks.
+- Between messages an **activity feed** shows each tool call as one plain-language
+  line with a state icon (running, done, failed, denied; SVG icons, no emoji):
+  "Read 6 files", "Edited `src/app.ts`", "Ran the tests: passed". Consecutive
+  reads and searches group into one line.
+- Clicking an item expands **Details**: tool name, arguments, output (the AIVEN
+  Terminal component for Bash) and the diff for edits. A global "Show details"
+  toggle (Cmd+Shift+D) expands everything.
+- **Approval cards** ask in plain language ("Run the tests?", "Edit 2 files?") with
+  the three buttons from 6.5. Safety exception to the clean look: a Bash approval
+  always shows the exact command on one line (truncated, expandable), because the
+  user is authorising that command. Edit and Write approvals show file names and a
+  "View changes" expander.
+
+### 8.4 Other behaviour
+
 - **Composer:** multiline, Enter sends, Shift+Enter newline, history with Up/Down.
 - **Streaming transcript:** markdown rendering, incremental.
-- **Tool cards:** one per call showing the tool, args summary, status (pending,
-  running, done, denied) and result. Bash output renders in the AIVEN Terminal
-  component. Edit/Write show a diff with the approval controls inline.
 - **Slash commands** with autocomplete: `/help`, `/clear`, `/compact`, `/init`,
   `/model`, `/mode`, `/spark`, `/undo`, `/cost`, `/resume`, `/settings`.
 - **`@file` mentions:** fuzzy path autocomplete from the project; the file's
   contents are attached to that message (subject to the path sandbox).
 - **`!` prefix:** run a shell command directly, going through the same
   `decide()` and OS sandbox as the agent's Bash.
-- **Todo panel:** driven by `TodoWrite`.
-- **Changed-files panel:** files touched this session with diffs and `/undo`.
 - **Sessions:** persisted per project as JSONL, `/resume` picker, auto-titled.
 - **Keyboard:** Esc interrupts, Shift+Tab cycles mode, Cmd+K command palette,
-  Cmd+, settings, Cmd+O open project.
+  Cmd+B sidebar, Cmd+Shift+D details, Cmd+, settings, Cmd+O open project. The
+  macOS menu bar keeps only the standard items (app, Edit roles, Window), so
+  copy and paste work.
 - **Settings:** API key (masked, stored via safeStorage), model id, permission
   mode, prompter mode and limits, step/token budgets, extra allowed directories,
   theme (AI dark default, AIVEN Studios light optional), audit log viewer.
@@ -356,9 +406,17 @@ ARC adopts the AIVEN AI theme directly, ported from its `tokens.json` into
 - Window: macOS `hiddenInset` title bar, ambient glow (orange top-left, blue
   bottom-right, very low opacity) behind glass panels, because the AI theme's glass
   needs something to blur.
-- Top bar (`av-nav`): ARC mark + wordmark left; badges right: engine
-  (`ENGINE // gemini-3.8-flash` with a live dot), mode (`ASK`, `AUTO-EDIT`,
-  `AUTO`, with `AUTO` in danger colour), token meter.
+- Header (`av-nav` style, 52px, section 8.2): sidebar toggle and project on the
+  left; the progress pill in the centre (`signal` live dot, mono label, thin
+  `accent` progress bar); Changes, Mode (`ASK`, `AUTO-EDIT`, `AUTO`, with `AUTO`
+  in danger colour) and Spark on the right. The engine badge
+  (`ENGINE // gemini-3.8-flash`) and token meter sit in the composer status line.
+- Premium feel: native vibrancy behind the sidebar, 160 to 240 ms ease-out
+  motion (popovers spring in, activity items collapse smoothly), a streaming
+  caret, sticky-bottom autoscroll that pauses when the user scrolls up, tabular
+  numerals for counters, `signal` focus rings, a Cmd+K command palette, an empty
+  state with Spark ideas, and window size and position restored on launch. No
+  window flash: the window stays hidden until ready and paints `surface` first.
 - Labels use the system voice: `ARC // SESSION`, `TOOL // BASH`,
   `01 // TODO`, `SPARK // 3 IDEAS`. Mono, uppercase, `signal` colour.
 - Tool cards: `av-panel--deep` with a mono label row and status badge.
@@ -433,7 +491,8 @@ is 6.1:1. `brand-blue` is decoration only (3.2:1). Focus rings use `signal`.
 3. Tools with tests.
 4. Vertex client + agent loop against the fake server.
 5. Renderer shell with AIVEN theme, transcript, composer, tool cards, approvals.
-6. Sessions, checkpoints, slash commands, `@mentions`, todo/changes panels.
+6. Sessions, checkpoints, slash commands, `@mentions`, header with progress pill,
+   Plan and Changes popovers, activity feed.
 7. Prompter + Autopilot.
 8. Settings, first run, audit viewer, logo/icon, packaging, README with the manual
    checklist.
