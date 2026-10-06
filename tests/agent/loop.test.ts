@@ -187,6 +187,24 @@ describe('permissions in the loop', () => {
     expect((await stat(join(root, 'out2'))).isDirectory()).toBe(true)
   })
 
+  it('reloadRules drops a rule that was removed, so the command asks again', async () => {
+    const { agent, approvals, rules } = await setup(
+      [
+        callTurn([{ name: 'Bash', args: { command: 'mkdir -p r1' } }]), textTurn('one'),
+        callTurn([{ name: 'Bash', args: { command: 'mkdir -p r2' } }]), textTurn('two'),
+        callTurn([{ name: 'Bash', args: { command: 'mkdir -p r3' } }]), textTurn('three'),
+      ],
+      { approver: async () => ({ decision: 'always' }) },
+    )
+    await agent.sendMessage('a')
+    await agent.sendMessage('b')
+    expect(approvals).toHaveLength(1)
+    await rules.remove({ tool: 'Bash', prefix: 'mkdir -p' })
+    await agent.reloadRules()
+    await agent.sendMessage('c')
+    expect(approvals).toHaveLength(2)
+  })
+
   it('"always allow" never saves a rule for a call that decide() denied', async () => {
     const { agent, rules, home } = await setup(
       [callTurn([{ name: 'Write', args: { file_path: join('..', 'outside.txt'), content: 'x' } }]), textTurn('ok')],

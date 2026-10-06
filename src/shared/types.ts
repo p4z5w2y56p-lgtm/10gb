@@ -91,6 +91,11 @@ export type AgentEvent =
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'turn-end'; reason: TurnEndReason }
   | { type: 'status'; state: StatusState; label: string }
+  | { type: 'question'; id: string; question: string; options?: string[] }
+  | { type: 'suggestions'; items: Suggestion[] }
+  | { type: 'autopilot'; running: boolean; reason?: string }
+  | { type: 'mode'; mode: PermissionMode }
+  | { type: 'changes'; files: string[]; canUndo: boolean }
   | {
       type: 'activity'
       id: string

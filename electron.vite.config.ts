@@ -6,7 +6,13 @@ export default defineConfig({
     build: { rollupOptions: { input: { index: resolve('src/main/index.ts') } } },
   },
   preload: {
-    build: { rollupOptions: { input: { index: resolve('src/preload/index.ts') } } },
+    // A sandboxed preload must be CommonJS.
+    build: {
+      rollupOptions: {
+        input: { index: resolve('src/preload/index.ts') },
+        output: { format: 'cjs', entryFileNames: '[name].cjs' },
+      },
+    },
   },
   renderer: {
     root: 'src/renderer',

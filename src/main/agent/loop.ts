@@ -102,6 +102,11 @@ export class AgentSession {
     this.settings = settings
   }
 
+  /** Re-read the saved always-allow rules, for example after the settings screen removed one. */
+  async reloadRules(): Promise<void> {
+    this.ruleCache = await this.o.rules.load()
+  }
+
   getHistory(): Content[] {
     return [...this.history]
   }
