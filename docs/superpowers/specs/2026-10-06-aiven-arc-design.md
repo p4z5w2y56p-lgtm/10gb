@@ -431,6 +431,12 @@ ARC adopts the AIVEN AI theme directly, ported from its `tokens.json` into
   numerals for counters, `signal` focus rings, a Cmd+K command palette, an empty
   state with Spark ideas, and window size and position restored on launch. No
   window flash: the window stays hidden until ready and paints `surface` first.
+- **Every screen gets the same polish, none is left default-styled:** first run
+  and the no-key lock screen, the main conversation, the empty state with Spark
+  ideas, each Settings section, approval cards, the Plan and Changes popovers, the
+  Cmd+K palette, the audit log viewer, the keyboard shortcuts sheet, and the error
+  states. That means custom selects, toggles, inputs, scrollbars and tooltips, one
+  spacing scale, one motion language, and a designed empty state on every list.
 - Labels use the system voice: `ARC // SESSION`, `TOOL // BASH`,
   `01 // TODO`, `SPARK // 3 IDEAS`. Mono, uppercase, `signal` colour.
 - Tool cards: `av-panel--deep` with a mono label row and status badge.
