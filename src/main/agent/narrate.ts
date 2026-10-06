@@ -4,7 +4,7 @@ import type { ActivityPhase, TodoItem, ToolCall, ToolResult } from '../../shared
 const MAX_LABEL = 80
 
 /** Plain-language labels only: short, no backticks, and never the text of a command. */
-function tidy(label: string): string {
+export function tidyLabel(label: string): string {
   const clean = label.replace(/`/g, '')
   return clean.length > MAX_LABEL ? `${clean.slice(0, MAX_LABEL - 1)}…` : clean
 }
@@ -37,17 +37,17 @@ export function describeCall(call: ToolCall): { phase: ActivityPhase; label: str
   const a = call.args
   switch (call.name) {
     case 'Read':
-      return { phase: 'reading', label: tidy(`Reading ${nameOf(a) ?? 'a file'}`) }
+      return { phase: 'reading', label: tidyLabel(`Reading ${nameOf(a) ?? 'a file'}`) }
     case 'LS':
-      return { phase: 'searching', label: tidy(`Listing ${nameOf(a, 'path') ?? 'the project'}`) }
+      return { phase: 'searching', label: tidyLabel(`Listing ${nameOf(a, 'path') ?? 'the project'}`) }
     case 'Glob':
       return { phase: 'searching', label: 'Finding files' }
     case 'Grep':
       return { phase: 'searching', label: 'Searching the project' }
     case 'Edit':
-      return { phase: 'editing', label: tidy(`Editing ${nameOf(a) ?? 'a file'}`) }
+      return { phase: 'editing', label: tidyLabel(`Editing ${nameOf(a) ?? 'a file'}`) }
     case 'Write':
-      return { phase: 'writing', label: tidy(`Creating ${nameOf(a) ?? 'a file'}`) }
+      return { phase: 'writing', label: tidyLabel(`Creating ${nameOf(a) ?? 'a file'}`) }
     case 'Bash': {
       const kind = bashKind(a.command)
       const label = {
@@ -60,7 +60,7 @@ export function describeCall(call: ToolCall): { phase: ActivityPhase; label: str
       return { phase: 'running', label }
     }
     case 'WebFetch':
-      return { phase: 'fetching', label: tidy(`Fetching ${host(a) ?? 'a web page'}`) }
+      return { phase: 'fetching', label: tidyLabel(`Fetching ${host(a) ?? 'a web page'}`) }
     case 'TodoWrite':
       return { phase: 'planning', label: 'Updating the plan' }
     case 'AskUser':
@@ -75,17 +75,17 @@ export function describeResult(call: ToolCall, result: ToolResult): string {
   const ok = result.ok
   switch (call.name) {
     case 'Read':
-      return tidy(ok ? `Read ${nameOf(a) ?? 'a file'}` : `Could not read ${nameOf(a) ?? 'a file'}`)
+      return tidyLabel(ok ? `Read ${nameOf(a) ?? 'a file'}` : `Could not read ${nameOf(a) ?? 'a file'}`)
     case 'LS':
-      return tidy(ok ? `Listed ${nameOf(a, 'path') ?? 'the project'}` : 'Could not list the folder')
+      return tidyLabel(ok ? `Listed ${nameOf(a, 'path') ?? 'the project'}` : 'Could not list the folder')
     case 'Glob':
       return ok ? 'Found files' : 'Search failed'
     case 'Grep':
       return ok ? 'Searched the project' : 'Search failed'
     case 'Edit':
-      return tidy(ok ? `Edited ${nameOf(a) ?? 'a file'}` : `Could not edit ${nameOf(a) ?? 'a file'}`)
+      return tidyLabel(ok ? `Edited ${nameOf(a) ?? 'a file'}` : `Could not edit ${nameOf(a) ?? 'a file'}`)
     case 'Write':
-      return tidy(ok ? `Created ${nameOf(a) ?? 'a file'}` : `Could not write ${nameOf(a) ?? 'a file'}`)
+      return tidyLabel(ok ? `Created ${nameOf(a) ?? 'a file'}` : `Could not write ${nameOf(a) ?? 'a file'}`)
     case 'Bash': {
       const kind = bashKind(a.command)
       const [good, bad] = {
@@ -98,7 +98,7 @@ export function describeResult(call: ToolCall, result: ToolResult): string {
       return ok ? good : bad
     }
     case 'WebFetch':
-      return tidy(ok ? `Fetched ${host(a) ?? 'a web page'}` : `Could not fetch ${host(a) ?? 'the page'}`)
+      return tidyLabel(ok ? `Fetched ${host(a) ?? 'a web page'}` : `Could not fetch ${host(a) ?? 'the page'}`)
     case 'TodoWrite':
       return ok ? 'Plan updated' : 'Could not update the plan'
     case 'AskUser':

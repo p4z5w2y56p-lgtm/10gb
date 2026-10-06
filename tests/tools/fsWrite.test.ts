@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, stat, symlink, utimes, writeFile } from 'node:f
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { readTool } from '../../src/main/tools/fsRead'
-import { editTool, makeDiff, writeTool } from '../../src/main/tools/fsWrite'
+import { editTool, makeDiff, previewChange, writeTool } from '../../src/main/tools/fsWrite'
 import { protectedWritePaths } from '../../src/main/safety/protected'
 import { makeFixture, type Fixture } from '../helpers/toolContext'
 
@@ -175,5 +175,37 @@ describe('makeDiff', () => {
     expect(d).toContain('-b')
     expect(d).toContain('+c')
     expect(d).toContain('@@')
+  })
+})
+
+describe('previewChange', () => {
+  const c = (name: string, args: Record<string, unknown>) => ({ id: 'p', name, args })
+
+  it('previews an Edit as a diff without touching the file', async () => {
+    await writeFile(file('a.txt'), 'hello world\n')
+    const d = await previewChange(c('Edit', { file_path: 'a.txt', old_string: 'world', new_string: 'there' }), fx.ctx)
+    expect(d).toContain('-hello world')
+    expect(d).toContain('+hello there')
+    expect(await readFile(file('a.txt'), 'utf8')).toBe('hello world\n')
+    expect(fx.snapshots).toEqual([])
+  })
+
+  it('previews a Write to a new file as additions and to an existing file as a diff', async () => {
+    const fresh = await previewChange(c('Write', { file_path: 'new.txt', content: 'one\ntwo\n' }), fx.ctx)
+    expect(fresh).toContain('+one')
+    await writeFile(file('old.txt'), 'before\n')
+    const over = await previewChange(c('Write', { file_path: 'old.txt', content: 'after\n' }), fx.ctx)
+    expect(over).toContain('-before')
+    expect(over).toContain('+after')
+    await expect(stat(file('new.txt'))).rejects.toThrow()
+  })
+
+  it('returns undefined when the change would fail or the tool has no preview', async () => {
+    await writeFile(file('a.txt'), 'abc')
+    expect(await previewChange(c('Edit', { file_path: 'a.txt', old_string: 'zzz', new_string: 'y' }), fx.ctx)).toBeUndefined()
+    expect(await previewChange(c('Edit', { file_path: 'nope.txt', old_string: 'a', new_string: 'b' }), fx.ctx)).toBeUndefined()
+    expect(await previewChange(c('Write', { file_path: join(fx.base, 'o.txt'), content: 'x' }), fx.ctx)).toBeUndefined()
+    expect(await previewChange(c('Bash', { command: 'ls' }), fx.ctx)).toBeUndefined()
+    expect(await previewChange(c('Edit', { file_path: 5 }), fx.ctx)).toBeUndefined()
   })
 })
