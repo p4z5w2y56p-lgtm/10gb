@@ -374,9 +374,23 @@ output exist but stay collapsed behind "Details" until the user asks for them.
   Cmd+B sidebar, Cmd+Shift+D details, Cmd+, settings, Cmd+O open project. The
   macOS menu bar keeps only the standard items (app, Edit roles, Window), so
   copy and paste work.
-- **Settings:** API key (masked, stored via safeStorage), model id, permission
-  mode, prompter mode and limits, step/token budgets, extra allowed directories,
-  theme (AI dark default, AIVEN Studios light optional), audit log viewer.
+- **Settings screen** (Cmd+, or `/settings`), laid out like Claude Code's: a left
+  list of sections and a pane on the right.
+  - *Models:* Vertex API key (masked field, Save, Remove, Test connection; stored
+    via safeStorage, never typed into a file or the source), **coder model** and
+    **prompter model** (each a dropdown that defaults to `gemini-3.8-flash`, with a
+    "Custom model id" entry for anything else).
+  - *Permissions:* default permission mode, extra allowed directories, the list of
+    saved "always allow" rules with a remove button.
+  - *Prompter:* Off / Suggest / Autopilot, round cap, token budget.
+  - *Appearance:* theme (AIVEN AI dark default, AIVEN Studios light), show details
+    by default.
+  - *Advanced:* step cap, per-turn token budget, context window size, audit log
+    viewer.
+- **Run gate:** with no API key saved, ARC cannot run. The composer is disabled
+  and shows "Add your Vertex API key in Settings to start", Spark and Autopilot
+  are off, and the backend refuses `send`, `spark` and `autopilot` with a
+  `no-api-key` error. Saving a key unlocks it immediately, with no restart.
 - **First run:** pick a project folder, paste the API key, "test connection"
   makes one tiny request and reports the result.
 
@@ -494,5 +508,7 @@ is 6.1:1. `brand-blue` is decoration only (3.2:1). Focus rings use `signal`.
 6. Sessions, checkpoints, slash commands, `@mentions`, header with progress pill,
    Plan and Changes popovers, activity feed.
 7. Prompter + Autopilot.
-8. Settings, first run, audit viewer, logo/icon, packaging, README with the manual
+8. Settings screen, first run, audit viewer, logo/icon, README with the manual
    checklist.
+9. **Packaging as a Mac app happens last and only after Matt confirms the design
+   and features are to his liking.** Until then the build stays a dev build.
