@@ -1,0 +1,32 @@
+{
+  "name": "aiven-arc",
+  "productName": "AIVEN ARC",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIVEN ARC: a macOS coding agent on Google Vertex AI (Gemini).",
+  "type": "module",
+  "main": "out/main/index.js",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "electron-vite build",
+    "dev": "electron-vite dev",
+    "arc": "tsx scripts/arc-cli.ts"
+  },
+  "dependencies": {
+    "diff": "^9.0.0",
+    "tinyglobby": "^0.2.17",
+    "undici": "^8.11.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/node": "^26.6.4",
+    "electron": "^44.6.0",
+    "electron-vite": "^5.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7",
+    "vitest": "^5.0.3"
+  }
+}
