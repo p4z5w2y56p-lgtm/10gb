@@ -104,6 +104,40 @@ describe('run gate', () => {
   })
 })
 
+describe('injected key store (terminal harness)', () => {
+  it('uses the given store and writes no key file to disk', async () => {
+    server = await startFakeVertex([text('hi')])
+    base = await realpath(await mkdtemp(join(tmpdir(), 'arc-backend-')))
+    const projectDir = join(base, 'project')
+    await mkdir(projectDir)
+    let stored: string | null = null
+    const keyStore = {
+      setApiKey: async (k: string) => void (stored = k.trim()),
+      getApiKey: async () => stored,
+      hasApiKey: async () => stored !== null,
+      clear: async () => void (stored = null),
+    }
+    const app = new BackendApp({
+      dataDir: join(base, 'data'),
+      cipher: xor,
+      keyStore,
+      home: join(base, 'home'),
+      emit: () => undefined,
+      vertexBaseUrl: server.baseUrl,
+      vertexSleep: async () => {},
+      sandboxAvailable: true,
+    })
+    await app.init()
+    await app.saveSettings({ prompter: { mode: 'off' } })
+    expect((await app.status()).ready).toBe(false)
+    await app.setApiKey(KEY)
+    await app.openProject(projectDir)
+    expect(await app.send('hello')).toBe('done')
+    expect(server.requests[0].headers['x-goog-api-key']).toBe(KEY)
+    await expect(stat(join(base, 'data', 'api-key.bin'))).rejects.toThrow()
+  })
+})
+
 describe('projects and turns', () => {
   it('canonicalizes a symlinked project root (review focus 1)', async () => {
     const { app, projectDir, base } = await make([text('ok')], { project: false })

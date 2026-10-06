@@ -20,7 +20,7 @@ import { buildSandboxProfile, detectSandboxExec } from './safety/sandboxExec'
 import { AuditLog, type AuditEntry } from './store/audit'
 import { CheckpointStore } from './store/checkpoints'
 import { ProjectRules } from './store/projectRules'
-import { SecretStore, type Cipher } from './store/secrets'
+import { SecretStore, type Cipher, type KeyStore } from './store/secrets'
 import { SessionStore, type SessionHandle, type SessionMeta } from './store/sessions'
 import { SettingsStore, type Settings, type SettingsPatch } from './store/settings'
 import { makeBashTool } from './tools/bash'
@@ -50,6 +50,8 @@ export interface BackendDeps {
   /** ARC's own data: settings, the encrypted key, sessions, audit logs, checkpoints. */
   dataDir: string
   cipher: Cipher
+  /** Replaces the encrypted on-disk store, for the terminal harness. */
+  keyStore?: KeyStore
   home: string
   emit: (e: AgentEvent) => void
   /** Tests point this at a local fake. */
@@ -99,7 +101,7 @@ interface ClientCache {
  */
 export class BackendApp {
   private readonly settingsStore: SettingsStore
-  private readonly secrets: SecretStore
+  private readonly secrets: KeyStore
   private readonly sessions: SessionStore
   private settings!: Settings
   private cache: ClientCache | null = null
@@ -112,7 +114,7 @@ export class BackendApp {
 
   constructor(private readonly deps: BackendDeps) {
     this.settingsStore = new SettingsStore(deps.dataDir)
-    this.secrets = new SecretStore(deps.dataDir, deps.cipher)
+    this.secrets = deps.keyStore ?? new SecretStore(deps.dataDir, deps.cipher)
     this.sessions = new SessionStore(join(deps.dataDir, 'sessions'))
   }
 

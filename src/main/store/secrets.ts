@@ -9,7 +9,15 @@ export interface Cipher {
   decrypt(blob: Buffer): string
 }
 
-export class SecretStore {
+/** Where the API key lives. The app uses the encrypted SecretStore; the terminal harness keeps it in memory. */
+export interface KeyStore {
+  setApiKey(key: string): Promise<void>
+  getApiKey(): Promise<string | null>
+  hasApiKey(): Promise<boolean>
+  clear(): Promise<void>
+}
+
+export class SecretStore implements KeyStore {
   private readonly file: string
 
   constructor(
