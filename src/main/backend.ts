@@ -59,6 +59,8 @@ export interface BackendDeps {
   vertexBaseUrl?: string
   vertexSleep?: (ms: number) => Promise<void>
   sandboxAvailable?: boolean
+  /** The container is the sandbox (cloud worker): Auto mode may run commands unattended without sandbox-exec. */
+  trustContainer?: boolean
 }
 
 export interface BackendStatus {
@@ -236,7 +238,8 @@ export class BackendApp {
 
     const { dataDir, home } = this.deps
     const tmp = await realpath(tmpdir())
-    const sandboxAvailable = this.deps.sandboxAvailable ?? detectSandboxExec()
+    const osSandbox = this.deps.sandboxAvailable ?? detectSandboxExec()
+    const sandboxAvailable = osSandbox || this.deps.trustContainer === true
     const audit = new AuditLog(join(dataDir, 'audit'), handle.id, () => (this.cache ? [this.cache.key] : []))
     const checkpoints = new CheckpointStore(join(dataDir, 'checkpoints'), handle.id)
     const rules = new ProjectRules(join(dataDir, 'rules'), root)
@@ -255,7 +258,7 @@ export class BackendApp {
       editTool,
       writeTool,
       makeBashTool({
-        sandboxProfile: () => (agent.mode === 'auto' && sandboxAvailable ? buildSandboxProfile(root, tmp) : undefined),
+        sandboxProfile: () => (agent.mode === 'auto' && osSandbox ? buildSandboxProfile(root, tmp) : undefined),
       }),
       todoTool,
       askUserTool,

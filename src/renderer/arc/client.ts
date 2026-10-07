@@ -5,6 +5,16 @@ import type { Settings, SettingsPatch } from '../../main/store/settings'
 import type { Content } from '../../main/vertex/types'
 import { IPC, type IpcResult } from '../../shared/channels'
 import type {
+  CloudDiff,
+  CloudSecretName,
+  CloudSessionInfo,
+  CloudStartRequest,
+  CloudStatus,
+  CloudTestResult,
+  PullRequestResult,
+  PushResult,
+} from '../../shared/cloud'
+import type {
   AgentEvent,
   AllowRule,
   PermissionMode,
@@ -32,6 +42,8 @@ export interface OpenedProject {
   root: string
   sessionId: string
   history: Content[]
+  /** Present when the opened session runs in the cloud. */
+  cloud?: CloudSessionInfo
 }
 
 /** Typed, unwrapping view of the backend. Failures become ArcError. */
@@ -74,6 +86,18 @@ export function createClient(arc: Arc) {
     readAudit: () => call<AuditEntry[]>(IPC.auditRead),
     spark: () => call<Suggestion[]>(IPC.spark),
     setAutopilot: (on: boolean) => call<{ settings: Settings; status: BackendStatus }>(IPC.autopilot, { on }),
+    cloudStatus: () => call<CloudStatus>(IPC.cloudStatus),
+    cloudSetSecret: (name: CloudSecretName, value: string) => call<CloudStatus>(IPC.cloudSetSecret, { name, value }),
+    cloudClearSecret: (name: CloudSecretName) => call<CloudStatus>(IPC.cloudClearSecret, { name }),
+    cloudTest: () => call<CloudTestResult[]>(IPC.cloudTest),
+    cloudStart: (req: CloudStartRequest) => call<OpenedProject>(IPC.cloudStart, req),
+    cloudSessions: () => call<CloudSessionInfo[]>(IPC.cloudSessions),
+    cloudAttach: (id: string) => call<OpenedProject>(IPC.cloudAttach, { id }),
+    cloudLeave: () => call<BackendStatus>(IPC.cloudLeave),
+    cloudEnd: (id: string) => call<null>(IPC.cloudEnd, { id }),
+    cloudDiff: () => call<CloudDiff>(IPC.cloudDiff),
+    cloudPush: () => call<PushResult>(IPC.cloudPush),
+    cloudPr: (req: { title: string; body?: string; draft?: boolean }) => call<PullRequestResult>(IPC.cloudPr, req),
     onEvent: (listener: (event: AgentEvent) => void) => arc.onEvent(listener),
   }
 }

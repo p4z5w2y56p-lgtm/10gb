@@ -377,3 +377,50 @@ describe('audit and rules', () => {
     await expect(stat(join(projectDir, 'made'))).rejects.toThrow()
   })
 })
+
+describe('container sandbox (cloud worker)', () => {
+  const build = (base: string, trustContainer: boolean, events: AgentEvent[]) =>
+    new BackendApp({
+      dataDir: join(base, 'data'),
+      cipher: xor,
+      home: join(base, 'home'),
+      emit: (e) => events.push(e),
+      vertexBaseUrl: server!.baseUrl,
+      vertexSleep: async () => {},
+      sandboxAvailable: false,
+      trustContainer,
+    })
+
+  it('auto mode runs a harmless command without asking when the container is the sandbox', async () => {
+    server = await startFakeVertex([call('Bash', { command: 'mkdir -p out' }), text('done')])
+    base = await realpath(await mkdtemp(join(tmpdir(), 'arc-backend-')))
+    const projectDir = join(base, 'project')
+    await mkdir(projectDir, { recursive: true })
+    const events: AgentEvent[] = []
+    const app = build(base, true, events)
+    await app.init()
+    await app.saveSettings({ prompter: { mode: 'off' }, permissionMode: 'auto' })
+    await app.setApiKey(KEY)
+    await app.openProject(projectDir)
+    expect(await app.send('make out')).toBe('done')
+    expect(ofType(events, 'approval-request')).toHaveLength(0)
+    expect((await stat(join(projectDir, 'out'))).isDirectory()).toBe(true)
+  })
+
+  it('without it, auto mode still asks (no OS sandbox), and hard denies hold either way', async () => {
+    server = await startFakeVertex([call('Bash', { command: 'mkdir -p out' }), text('stopped')])
+    base = await realpath(await mkdtemp(join(tmpdir(), 'arc-backend-')))
+    const projectDir = join(base, 'project')
+    await mkdir(projectDir, { recursive: true })
+    const events: AgentEvent[] = []
+    const app = build(base, false, events)
+    await app.init()
+    await app.saveSettings({ prompter: { mode: 'off' }, permissionMode: 'auto' })
+    await app.setApiKey(KEY)
+    await app.openProject(projectDir)
+    const turn = app.send('make out')
+    await waitFor(() => app.hasPendingApproval('c1'))
+    app.resolveApproval('c1', { decision: 'deny' })
+    await turn
+  })
+})

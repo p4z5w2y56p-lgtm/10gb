@@ -1,11 +1,15 @@
 import type { z } from 'zod'
 import { IPC, type Channel, type IpcResult } from '../shared/channels'
 import { IPC_SCHEMAS, type IpcSchemas } from '../shared/ipc'
-import { NoProjectError, NotReadyError, type BackendApp } from './backend'
+import type { CloudSecretName, CloudStartRequest } from '../shared/cloud'
+import type { AllowRule } from '../shared/types'
+import { NoProjectError, NotReadyError } from './backend'
+import type { Backend } from './backendApi'
 import { redact } from './safety/redact'
+import type { SettingsPatch } from './store/settings'
 
 export interface HandlerDeps {
-  app: BackendApp
+  app: Backend
   /** Is the frame that sent this request one of ours? */
   isTrusted: (senderUrl: string) => boolean
   /** Native folder picker; null when cancelled. */
@@ -14,10 +18,26 @@ export interface HandlerDeps {
 
 export type Handler = (senderUrl: string, payload: unknown) => Promise<IpcResult>
 
-function failure(err: unknown): IpcResult {
+/** GitHub token shapes that redact() does not know; they can reach an error text from a failed push or API call. */
+const GITHUB_TOKENS = [/\bgh[pousr]_[A-Za-z0-9]{20,}/g, /\bgithub_pat_[A-Za-z0-9_]{20,}/g]
+
+function scrub(text: string, secrets: string[]): string {
+  let out = redact(text, secrets)
+  for (const re of GITHUB_TOKENS) out = out.replace(re, '[REDACTED]')
+  return out
+}
+
+function failure(err: unknown, secrets: string[] = []): IpcResult {
   if (err instanceof NotReadyError) return { ok: false, error: err.message, code: err.code }
   if (err instanceof NoProjectError) return { ok: false, error: err.message, code: err.code }
-  return { ok: false, error: redact(err instanceof Error ? err.message : String(err)) }
+  return { ok: false, error: scrub(err instanceof Error ? err.message : String(err), secrets) }
+}
+
+/** Values the caller just submitted: they are scrubbed from any error that comes back, whatever they look like. */
+function submittedSecrets(channel: Channel, data: unknown): string[] {
+  if (channel === IPC.setKey) return [(data as { key: string }).key]
+  if (channel === IPC.cloudSetSecret) return [(data as { value: string }).value]
+  return []
 }
 
 /**
@@ -49,17 +69,32 @@ export function createHandlers(deps: HandlerDeps): Record<Channel, Handler> {
     [IPC.openProject]: (d) => app.openProject((d as { path: string }).path),
     [IPC.status]: () => app.status(),
     [IPC.settingsGet]: () => app.getSettings(),
-    [IPC.settingsSave]: (d) => app.saveSettings((d as { patch: Parameters<BackendApp['saveSettings']>[0] }).patch),
+    [IPC.settingsSave]: (d) => app.saveSettings((d as { patch: SettingsPatch }).patch),
     [IPC.setKey]: (d) => app.setApiKey((d as { key: string }).key),
     [IPC.clearKey]: () => app.clearApiKey(),
     [IPC.testKey]: () => app.testConnection(),
     [IPC.sessionsList]: () => app.listSessions(),
     [IPC.sessionsResume]: (d) => app.resumeSession((d as { id: string }).id),
     [IPC.rulesList]: () => app.listRules(),
-    [IPC.rulesRemove]: (d) => app.removeRule((d as { rule: Parameters<BackendApp['removeRule']>[0] }).rule),
+    [IPC.rulesRemove]: (d) => app.removeRule((d as { rule: AllowRule }).rule),
     [IPC.auditRead]: () => app.readAudit(),
     [IPC.spark]: () => app.spark(),
     [IPC.autopilot]: (d) => app.autopilot((d as { on: boolean }).on),
+    [IPC.cloudStatus]: () => app.cloudStatus(),
+    [IPC.cloudSetSecret]: (d) => {
+      const { name, value } = d as { name: CloudSecretName; value: string }
+      return app.cloudSetSecret(name, value)
+    },
+    [IPC.cloudClearSecret]: (d) => app.cloudClearSecret((d as { name: CloudSecretName }).name),
+    [IPC.cloudTest]: () => app.cloudTest(),
+    [IPC.cloudStart]: (d) => app.cloudStart(d as CloudStartRequest),
+    [IPC.cloudSessions]: () => app.cloudSessions(),
+    [IPC.cloudAttach]: (d) => app.cloudAttach((d as { id: string }).id),
+    [IPC.cloudLeave]: () => app.cloudLeave(),
+    [IPC.cloudEnd]: (d) => app.cloudEnd((d as { id: string }).id),
+    [IPC.cloudDiff]: () => app.cloudDiff(),
+    [IPC.cloudPush]: () => app.cloudPush(),
+    [IPC.cloudPr]: (d) => app.cloudPr(d as { title: string; body?: string; draft?: boolean }),
   }
 
   const handlers = {} as Record<Channel, Handler>
@@ -76,7 +111,7 @@ export function createHandlers(deps: HandlerDeps): Record<Channel, Handler> {
         const data = await (impls[channel] as (d: unknown) => unknown)(parsed.data)
         return { ok: true, data: data ?? null }
       } catch (err) {
-        return failure(err)
+        return failure(err, submittedSecrets(channel, parsed.data))
       }
     }
   }

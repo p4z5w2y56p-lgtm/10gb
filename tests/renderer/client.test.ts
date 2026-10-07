@@ -41,6 +41,9 @@ describe('createClient', () => {
       c.getSettings(), c.saveSettings({ prompterModel: 'x', prompter: { mode: 'off' } }), c.setKey('abc'), c.clearKey(),
       c.testKey(), c.listSessions(), c.resumeSession('s1'), c.listRules(), c.removeRule({ tool: 'Bash', prefix: 'npm test' }),
       c.readAudit(), c.spark(), c.setAutopilot(true),
+      c.cloudStatus(), c.cloudSetSecret('github-token', 'ghp_x'), c.cloudClearSecret('cloud-token'), c.cloudTest(),
+      c.cloudStart({ repo: 'me/app', baseBranch: 'main', name: 'fix' }), c.cloudSessions(), c.cloudAttach('c1'), c.cloudLeave(),
+      c.cloudEnd('c1'), c.cloudDiff(), c.cloudPush(), c.cloudPr({ title: 'Fix', body: 'b', draft: true }),
     ])
     const seen = new Set(arc.calls.map((x) => x.channel))
     for (const call of arc.calls) {

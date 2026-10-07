@@ -379,6 +379,34 @@ export function splitSegments(cmd: string): { segments: string[]; unparsable: bo
   return { segments, unparsable: P.unparsable }
 }
 
+// ------------------------------------------------------- metadata endpoints
+
+/** One octet of 169.254.169.254 in decimal (leading zeros allowed), octal or hex. */
+const octet = (dec: string, oct: string, hex: string): string => `(?:0x0*${hex}|0+${oct}|0*${dec})`
+const METADATA_PATTERNS: RegExp[] = [
+  /metadata\.google\.internal/,
+  /metadata\.goog(?![a-z0-9-])/,
+  // Dotted quad, any mix of decimal, octal and hex octets.
+  new RegExp(
+    `(?<![0-9a-z.])${octet('169', '251', 'a9')}\\.${octet('254', '376', 'fe')}\\.${octet('169', '251', 'a9')}\\.${octet('254', '376', 'fe')}(?![0-9a-z])`,
+  ),
+  // The same address as one number, or in the short a.b.c and a.b forms.
+  /(?<![0-9a-z.])(?:0*2852039166|0+25177524776|0x0*a9fea9fe)(?![0-9a-z])/,
+  /(?<![0-9a-z.])169\.254\.43518(?![0-9a-z])/,
+  /(?<![0-9a-z.])169\.16689662(?![0-9a-z])/,
+  // AWS IPv6 endpoint, compressed or spelled out; IPv4-mapped IPv6 in hex groups.
+  /fd00:0*ec2(?::0*)*:0*254(?![0-9a-f])/,
+  /(?<![0-9a-f])0*a9fe:0*a9fe(?![0-9a-f])/,
+]
+
+/** Whether text names a cloud metadata endpoint (spec 14.5). Case-insensitive. */
+export function namesMetadataEndpoint(text: string): boolean {
+  const t = text.toLowerCase()
+  return METADATA_PATTERNS.some((re) => re.test(t))
+}
+
+const METADATA_DENY = 'the cloud metadata service is off limits'
+
 // --------------------------------------------------------------- analysis
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh'])
@@ -647,6 +675,14 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
     return out
   }
   const P = parse(cmd)
+  // Raw text catches anything inside quotes, URLs and substitutions; the parsed words catch quote or backslash splitting.
+  if (
+    namesMetadataEndpoint(cmd) ||
+    P.segments.some((s) => s.words.some((w) => namesMetadataEndpoint(w.text.split(PLACEHOLDER).join(''))))
+  ) {
+    out.deny = METADATA_DENY
+    return out
+  }
   const sensitive = ctx.sensitivePaths ?? sensitiveReadPaths(ctx.home, '')
   let cwd = startCwd
   let allReadonly = P.segments.length > 0 && !P.hasSubstitution && !P.unparsable
