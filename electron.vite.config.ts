@@ -18,6 +18,6 @@ export default defineConfig({
   renderer: {
     plugins: [react()],
     root: 'src/renderer',
-    build: { rollupOptions: { input: resolve('src/renderer/index.html') } },
+    build: { minify: 'esbuild', rollupOptions: { input: resolve('src/renderer/index.html') } },
   },
 })
