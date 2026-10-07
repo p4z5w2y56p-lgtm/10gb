@@ -56,6 +56,7 @@
   --shadow-cta: 0 0 20px rgba(255, 107, 0, 0.2);
   --shadow-signal: 0 0 15px rgba(0, 229, 255, 0.2);
   --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --scrim: rgba(0, 0, 0, 0.55);
   --glow-orange: rgba(255, 107, 0, 0.07);
   --glow-blue: rgba(0, 68, 255, 0.07);
   --term-bg: rgba(3, 3, 5, 0.9);
@@ -91,6 +92,7 @@
   --shadow-cta: 0 10px 30px rgba(0, 0, 0, 0.15);
   --shadow-signal: none;
   --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.18);
+  --scrim: rgba(3, 3, 3, 0.35);
   --glow-orange: transparent;
   --glow-blue: transparent;
   --term-bg: rgba(3, 3, 5, 0.92);
