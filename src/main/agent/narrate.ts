@@ -1,5 +1,7 @@
-import { basename } from 'node:path'
 import type { ActivityPhase, TodoItem, ToolCall, ToolResult } from '../../shared/types'
+
+/** Last path segment; works in the renderer too (no node:path). */
+const basename = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p
 
 const MAX_LABEL = 80
 
