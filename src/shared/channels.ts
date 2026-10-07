@@ -47,4 +47,4 @@ export const INVOKE_CHANNELS: readonly string[] = Object.entries(IPC)
 
 export type IpcResult<T = unknown> =
   | { ok: true; data: T }
-  | { ok: false; error: string; code?: 'no-api-key' | 'no-project' | 'invalid' | 'untrusted' }
+  | { ok: false; error: string; code?: 'no-api-key' | 'no-project' | 'invalid' | 'untrusted' | 'busy' }

@@ -174,3 +174,80 @@ describe('loading and ui', () => {
     expect(s.app?.projectRoot).toBe('/p')
   })
 })
+
+describe('history-reload (cloud attach and catch-up)', () => {
+  const history = [
+    { role: 'user' as const, parts: [{ text: 'Add a login page' }] },
+    { role: 'model' as const, parts: [{ text: 'On it.' }, { functionCall: { name: 'Write', args: { file_path: 'login.tsx' }, id: 'w1' } }] },
+  ]
+
+  it('rebuilds the transcript from the history and keeps the rest of the state', () => {
+    let s = reduce(initialState, { type: 'user-message', text: 'stale local text' })
+    s = ev(
+      s,
+      { type: 'todos', todos: [{ id: '1', content: 'a', status: 'pending' }] },
+      { type: 'usage', promptTokens: 5, outputTokens: 1, totalTokens: 6 },
+      { type: 'mode', mode: 'auto' },
+      { type: 'autopilot', running: true },
+      { type: 'notice', level: 'info', message: 'old notice' },
+    )
+    const next = ev(s, { type: 'history-reload', history })
+    expect(next.transcript.map((i) => i.kind)).toEqual(['user', 'assistant', 'activity'])
+    expect(next.transcript[0]).toMatchObject({ text: 'Add a login page' })
+    expect(next.todos).toEqual(s.todos)
+    expect(next.usage).toEqual(s.usage)
+    expect(next.mode).toBe('auto')
+    expect(next.autopilot).toEqual({ running: true })
+    expect(next.busy).toBe(true)
+    expect(next.ui).toEqual(s.ui)
+    expect(next.cloud).toEqual(s.cloud)
+  })
+
+  it('forgets a pending approval or question: the router sends the current ones right after', () => {
+    const s = ev(
+      initialState,
+      { type: 'approval-request', request: { call: call('w1', 'Write', { file_path: 'a' }), reason: 'ask' } },
+      { type: 'question', id: 'q1', question: 'Which?' },
+    )
+    expect(s.approval).not.toBeNull()
+    const next = ev(s, { type: 'history-reload', history })
+    expect(next.approval).toBeNull()
+    expect(next.question).toBeNull()
+  })
+
+  it('then shows exactly what a connected client would: in-flight text streams on, the approval attaches to its activity', () => {
+    const s = ev(
+      initialState,
+      { type: 'history-reload', history },
+      { type: 'text-delta', text: 'Half a sent' },
+      { type: 'approval-request', request: { call: call('w1', 'Write', { file_path: 'login.tsx' }), reason: 'ask', diff: '+x' } },
+      { type: 'question', id: 'q1', question: 'Which?', options: ['a'] },
+      { type: 'status', state: 'waiting-approval', label: 'Waiting for you' },
+      { type: 'text-delta', text: 'ence' },
+    )
+    const assistants = s.transcript.filter((i) => i.kind === 'assistant')
+    expect(assistants.at(-1)).toMatchObject({ text: 'Half a sentence', streaming: true })
+    expect(s.transcript.find((i) => i.kind === 'activity')).toMatchObject({ callId: 'w1', state: 'running', diff: '+x' })
+    expect(s.approval?.call.id).toBe('w1')
+    expect(s.question).toEqual({ id: 'q1', question: 'Which?', options: ['a'] })
+    expect(s.status.state).toBe('waiting-approval')
+    expect(s.busy).toBe(true)
+  })
+
+  it('a turn-end after the reload frees the composer', () => {
+    const s = ev(initialState, { type: 'history-reload', history }, { type: 'status', state: 'working', label: 'x' }, { type: 'turn-end', reason: 'error' })
+    expect(s.busy).toBe(false)
+    expect(s.status).toEqual({ state: 'idle', label: 'Idle' })
+  })
+})
+
+describe('status marks a running turn as busy', () => {
+  it('a non-idle status makes the renderer busy even when the turn started elsewhere; idle alone does not clear it', () => {
+    let s = ev(initialState, { type: 'status', state: 'thinking', label: 'Thinking' })
+    expect(s.busy).toBe(true)
+    s = ev(s, { type: 'status', state: 'idle', label: 'Idle' })
+    expect(s.busy).toBe(true)
+    s = ev(s, { type: 'turn-end', reason: 'done' })
+    expect(s.busy).toBe(false)
+  })
+})

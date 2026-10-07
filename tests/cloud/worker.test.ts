@@ -859,3 +859,256 @@ describe('secrets never leak', () => {
     expect(String(e2.message)).not.toContain(GTOKEN)
   })
 })
+
+// ---------------------------------------------------------------- review fixes
+
+describe('history carries what a connected client would know (pending prompts, in-flight text)', () => {
+  const holdAfter = (t: string): FakeEntry => ({ chunks: [chunk([{ text: t }], {})], holdMs: Infinity })
+
+  it('returns the pending approval with the seq, and clears it once the call is answered', async () => {
+    const { w, watch } = await make([call('Write', { file_path: 'a.txt', content: 'A' }, 'w1'), text('wrote it')])
+    const info = await w.create(bodyOf())
+    const events = watch(info.id)
+    await send(w, info.id, 'write a.txt')
+    await waitFor(() => ofType(events, 'approval-request').length > 0)
+    const h = w.history(info.id)
+    expect(h.pending.approval?.call.id).toBe('w1')
+    expect(h.pending.question).toBeUndefined()
+    expect(h.inflight).toBeUndefined()
+    expect(h.seq).toBe(events.length)
+    await w.invoke(info.id, 'agent:approval', { requestId: 'w1', decision: 'deny' })
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+    expect(w.history(info.id).pending).toEqual({})
+  })
+
+  it('returns the pending question until it is answered', async () => {
+    const { w, watch } = await make([call('AskUser', { question: 'Which one?', options: ['a', 'b'] }, 'q1'), text('ok')])
+    const info = await w.create(bodyOf())
+    const events = watch(info.id)
+    await send(w, info.id, 'ask me')
+    await waitFor(() => ofType(events, 'question').length > 0)
+    const q = ofType(events, 'question')[0]
+    expect(w.history(info.id).pending.question).toEqual({ id: q.id, question: 'Which one?', options: ['a', 'b'] })
+    await w.invoke(info.id, 'agent:answer', { questionId: q.id, answer: 'a' })
+    expect(w.history(info.id).pending.question).toBeUndefined()
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+  })
+
+  it('returns the assistant text streamed so far as in-flight, and not once it is part of the history', async () => {
+    const { w, watch } = await make([holdAfter('Working on it, ')])
+    const info = await w.create(bodyOf())
+    const events = watch(info.id)
+    await send(w, info.id, 'go')
+    await waitFor(() => ofType(events, 'text-delta').length > 0)
+    const h = w.history(info.id)
+    expect(h.inflight).toEqual({ text: 'Working on it, ' })
+    expect(JSON.stringify(h.history)).not.toContain('Working on it')
+    await w.invoke(info.id, 'agent:stop', undefined)
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+    expect(w.history(info.id).inflight).toBeUndefined()
+  })
+
+  it('never has the same text in both the history and the in-flight text (committed message, pending approval)', async () => {
+    const { w, watch } = await make([
+      { chunks: [chunk([{ text: 'Let me write it.' }, { functionCall: { name: 'Write', args: { file_path: 'a.txt', content: 'A' }, id: 'w1' } }], {}, 'STOP')] },
+      text('done'),
+    ])
+    const info = await w.create(bodyOf())
+    const events = watch(info.id)
+    await send(w, info.id, 'go')
+    await waitFor(() => ofType(events, 'approval-request').length > 0)
+    const h = w.history(info.id)
+    expect(JSON.stringify(h.history)).toContain('Let me write it.')
+    expect(h.inflight).toBeUndefined()
+    expect(h.pending.approval?.call.id).toBe('w1')
+    await w.invoke(info.id, 'agent:stop', undefined)
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+  })
+
+  it('scrubs secrets in the pending approval and in-flight text', async () => {
+    const { w, watch } = await make([holdAfter(`my key ${VKEY} `)])
+    const info = await w.create(bodyOf())
+    const events = watch(info.id)
+    await send(w, info.id, 'go')
+    await waitFor(() => ofType(events, 'text-delta').length > 0)
+    expect(JSON.stringify(w.history(info.id))).not.toContain(VKEY)
+    await w.invoke(info.id, 'agent:stop', undefined)
+  })
+})
+
+describe('idle sweep keeps live sessions and saves unpushed work first', () => {
+  const autoEdit = SettingsSchema.parse({ prompter: { mode: 'off' }, permissionMode: 'auto-edit' })
+
+  it('does not delete a session with an attached stream, however old', async () => {
+    const { w, advance } = await make([], { idleMs: 1000 })
+    const a = await w.create(bodyOf())
+    const sub = w.subscribe(a.id, 0, () => {})
+    advance(5000)
+    await w.sweep()
+    expect(w.list()).toHaveLength(1)
+    sub.unsubscribe()
+    advance(5000)
+    await w.sweep()
+    expect(w.list()).toHaveLength(0)
+  })
+
+  it('commits and pushes unpushed work before deleting an idle session', async () => {
+    const { w, git, advance } = await make([call('Write', { file_path: 'f.txt', content: 'x' }), text('done')], { idleMs: 1000 })
+    const info = await w.create(bodyOf({ settings: autoEdit, autoPush: false }))
+    await send(w, info.id, 'write f')
+    await waitFor(() => !w.get(info.id).busy)
+    expect(git.pushes).toHaveLength(0)
+    advance(5000)
+    await w.sweep()
+    expect(git.pushes).toHaveLength(1)
+    expect(git.pushes[0]).toMatchObject({ branch: info.branch })
+    expect(w.list()).toHaveLength(0)
+  })
+
+  it('keeps the session and logs a warning when that push fails', async () => {
+    const lines: string[] = []
+    const { w, git, advance } = await make([call('Write', { file_path: 'f.txt', content: 'x' }), text('done')], { idleMs: 1000, logger: (l: string) => lines.push(l) })
+    const info = await w.create(bodyOf({ settings: autoEdit, autoPush: false }))
+    await send(w, info.id, 'write f')
+    await waitFor(() => !w.get(info.id).busy)
+    git.failPush = new Error(`remote said no for ${GTOKEN}`)
+    advance(5000)
+    await w.sweep()
+    expect(w.list()).toHaveLength(1)
+    expect(lines.join('\n')).toMatch(/could not save|unpushed/i)
+    expect(lines.join('\n')).not.toContain(GTOKEN)
+    git.failPush = null
+    await w.sweep()
+    expect(w.list()).toHaveLength(0)
+  })
+
+  it('does not push for a session with nothing unpushed', async () => {
+    const { w, git, advance } = await make([], { idleMs: 1000 })
+    await w.create(bodyOf())
+    advance(5000)
+    await w.sweep()
+    expect(git.pushes).toHaveLength(0)
+    expect(w.list()).toHaveLength(0)
+  })
+})
+
+describe('create can be abandoned', () => {
+  it('passes a signal to the clone, and an abort during the clone leaves no session and no files', async () => {
+    const { w, git, dataDir } = await make()
+    const ctl = new AbortController()
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const clone = git.clone.bind(git)
+    let started = false
+    git.clone = async (o) => {
+      started = true
+      await gate
+      return clone(o)
+    }
+    const p = w.create(bodyOf(), ctl.signal).catch((e) => e)
+    await waitFor(() => started)
+    ctl.abort()
+    release()
+    const err = await p
+    expect(err).toBeInstanceOf(Error)
+    expect(w.list()).toEqual([])
+    expect(await readdir(join(dataDir, 'work')).catch(() => [])).toEqual([])
+    expect(await readdir(join(dataDir, 'sessions')).catch(() => [])).toEqual([])
+    expect(git.clones[0].signal).toBe(ctl.signal)
+  })
+
+  it('an already aborted signal clones nothing', async () => {
+    const { w, git } = await make()
+    const ctl = new AbortController()
+    ctl.abort()
+    await expect(w.create(bodyOf(), ctl.signal)).rejects.toBeInstanceOf(Error)
+    expect(git.clones).toHaveLength(0)
+    expect(w.list()).toEqual([])
+  })
+})
+
+describe('settings:save carries cloud.autoPush into the running session', () => {
+  const autoEdit = SettingsSchema.parse({ prompter: { mode: 'off' }, permissionMode: 'auto-edit' })
+  const script = (): FakeEntry[] => [call('Write', { file_path: 'f.txt', content: 'x' }), text('done'), call('Write', { file_path: 'g.txt', content: 'y' }), text('done again')]
+
+  it('turns auto-push off and on again', async () => {
+    const { w, git, watch } = await make(script())
+    const info = await w.create(bodyOf({ settings: autoEdit }))
+    const events = watch(info.id)
+    expect(await w.invoke(info.id, 'settings:save', { patch: { cloud: { autoPush: false } } })).toMatchObject({ ok: true })
+    await send(w, info.id, 'one')
+    await waitFor(() => ofType(events, 'turn-end').length === 1)
+    await new Promise((r) => setTimeout(r, 100))
+    expect(git.pushes).toHaveLength(0)
+    expect(await w.invoke(info.id, 'settings:save', { patch: { cloud: { autoPush: true } } })).toMatchObject({ ok: true })
+    await send(w, info.id, 'two')
+    await waitFor(() => git.pushes.length === 1)
+  })
+
+  it('still ignores the other cloud fields and rejects a bad autoPush', async () => {
+    const { w } = await make()
+    const info = await w.create(bodyOf())
+    expect(await w.invoke(info.id, 'settings:save', { patch: { cloud: { autoPush: 'no' } } })).toMatchObject({ ok: false, code: 'invalid' })
+    const r = await w.invoke(info.id, 'settings:save', { patch: { cloud: { workerUrl: 'https://evil.example', autoPush: false } } })
+    expect(r).toMatchObject({ ok: true, data: { settings: { cloud: { workerUrl: '' } } } })
+  })
+})
+
+describe('clearApiKey over secrets', () => {
+  it('removes the key from the session and stops the turn', async () => {
+    const { w, watch } = await make([{ chunks: [], holdMs: Infinity }])
+    const info = await w.create(bodyOf())
+    const events = watch(info.id)
+    await send(w, info.id, 'long')
+    await waitFor(() => w.get(info.id).busy)
+    await w.putSecrets(info.id, { clearApiKey: true })
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+    expect(await w.invoke(info.id, 'app:status', undefined)).toMatchObject({ ok: true, data: { hasApiKey: false } })
+    expect(await send(w, info.id, 'again')).toMatchObject({ ok: false, code: 'no-api-key' })
+  })
+
+  it('refuses clearApiKey together with a new key', async () => {
+    const { w } = await make()
+    const info = await w.create(bodyOf())
+    await expect(w.putSecrets(info.id, { clearApiKey: true, apiKey: 'another-key-1234' })).rejects.toMatchObject({ code: 'invalid' })
+  })
+})
+
+describe('paths in invoke results', () => {
+  it('error text hides the worker data dir and secrets', async () => {
+    const { w, dataDir } = await make()
+    const info = await w.create(bodyOf())
+    const s = (w as unknown as { sessions: Map<string, { app: { getChanges(): Promise<unknown> } }> }).sessions.get(info.id)!
+    s.app.getChanges = async () => {
+      throw new Error(`ENOENT: no such file ${join(dataDir, 'work', info.id, 'repo', 'x.ts')} with ${VKEY}`)
+    }
+    const r = await w.invoke(info.id, 'agent:changes', undefined)
+    expect(r).toMatchObject({ ok: false })
+    const msg = (r as { error: string }).error
+    expect(msg).not.toContain(dataDir)
+    expect(msg).not.toContain(VKEY)
+    expect(msg).toContain('<workspace>')
+  })
+
+  it('agent:changes and agent:undo return paths relative to the repository root', async () => {
+    const { w, watch } = await make([call('Write', { file_path: 'sub/f.txt', content: 'x' }), text('done')])
+    const info = await w.create(bodyOf({ settings: SettingsSchema.parse({ prompter: { mode: 'off' }, permissionMode: 'auto-edit' }), autoPush: false }))
+    const events = watch(info.id)
+    await send(w, info.id, 'write')
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+    const changes = await w.invoke(info.id, 'agent:changes', undefined)
+    expect(changes).toEqual({ ok: true, data: { files: ['sub/f.txt'], canUndo: true } })
+    const undo = await w.invoke(info.id, 'agent:undo', undefined)
+    expect(undo).toEqual({ ok: true, data: { restored: [], removed: ['sub/f.txt'] } })
+  })
+
+  it('changes events show relative paths too', async () => {
+    const { w, watch } = await make([call('Write', { file_path: 'sub/f.txt', content: 'x' }), text('done')])
+    const info = await w.create(bodyOf({ settings: SettingsSchema.parse({ prompter: { mode: 'off' }, permissionMode: 'auto-edit' }), autoPush: false }))
+    const events = watch(info.id)
+    await send(w, info.id, 'write')
+    await waitFor(() => ofType(events, 'turn-end').length > 0)
+    const last = ofType(events, 'changes').at(-1)
+    expect(last?.files).toEqual(['sub/f.txt'])
+  })
+})

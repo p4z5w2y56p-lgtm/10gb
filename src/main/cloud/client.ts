@@ -3,7 +3,7 @@ import type { CloudDiff, CloudSessionInfo, PullRequestResult, PushResult } from 
 import type { AgentEvent } from '../../shared/types'
 import { redact } from '../safety/redact'
 import type { Content } from '../vertex/types'
-import type { CreateSessionBody, InvokeBody, PrBody, SecretsBody } from './protocol'
+import type { CreateSessionBody, HistoryResponse, InvokeBody, PrBody, SecretsBody } from './protocol'
 import { SseParser } from './sseParser'
 
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024
@@ -87,7 +87,19 @@ const PushSchema = z.object({
   url: z.string(),
 })
 const PrSchema = z.object({ number: z.number(), url: z.string(), draft: z.boolean(), existing: z.boolean() })
-const HistorySchema = z.object({ history: z.array(z.unknown()), seq: z.number().int().min(0) })
+const ApprovalSchema = z.object({
+  call: z.object({ id: z.string(), name: z.string(), args: z.record(z.string(), z.unknown()) }),
+  reason: z.string(),
+  diff: z.string().optional(),
+})
+const QuestionSchema = z.object({ id: z.string(), question: z.string(), options: z.array(z.string()).optional() })
+const HistorySchema = z.object({
+  history: z.array(z.unknown()),
+  seq: z.number().int().min(0),
+  // Absent on a worker from before these existed: then nothing is pending.
+  pending: z.object({ approval: ApprovalSchema.optional(), question: QuestionSchema.optional() }).default({}),
+  inflight: z.object({ text: z.string() }).optional(),
+})
 const IpcResultSchema = z.union([
   z.object({ ok: z.literal(true), data: z.unknown() }),
   z.object({ ok: z.literal(false), error: z.string(), code: z.string().optional() }),
@@ -110,6 +122,15 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 function unref(timer: ReturnType<typeof setTimeout>): void {
   ;(timer as { unref?: () => void }).unref?.()
+}
+
+function hasBodyCode(text: string): boolean {
+  try {
+    const b = JSON.parse(text) as { code?: unknown }
+    return typeof b?.code === 'string'
+  } catch {
+    return false
+  }
 }
 
 function causeCode(err: unknown): string {
@@ -202,9 +223,14 @@ export class CloudClient {
     await this.request('PUT', `${this.session(id)}/secrets`, { body })
   }
 
-  async history(id: string): Promise<{ history: Content[]; seq: number }> {
+  async history(id: string): Promise<HistoryResponse> {
     const h = this.parse(HistorySchema, await this.request('GET', `${this.session(id)}/history`))
-    return { history: h.history as Content[], seq: h.seq }
+    return {
+      history: h.history as Content[],
+      seq: h.seq,
+      pending: h.pending as HistoryResponse['pending'],
+      ...(h.inflight ? { inflight: h.inflight } : {}),
+    }
   }
 
   async diff(id: string): Promise<CloudDiff> {
@@ -405,6 +431,7 @@ export class CloudClient {
       const how = Number.isFinite(wait) && wait > 0 ? `Wait ${Math.ceil(wait)} seconds` : 'Wait a minute'
       return new CloudError(`The worker says there were too many requests. ${how}, then try again.`, 'rate-limited', status)
     }
+    if (status === 409 && !hasBodyCode(text)) return new CloudError('A turn is already running. Stop it or wait for it to finish.', 'busy', status)
     if (status === 404 && /^\/v1\/sessions\/[^/]+/.test(path)) {
       return new CloudError('That cloud session no longer exists on the worker. It may have expired or the worker restarted.', 'session-gone', status)
     }

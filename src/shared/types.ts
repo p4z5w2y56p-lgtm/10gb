@@ -1,5 +1,7 @@
 /** Contracts shared by the main process, the preload bridge and the renderer. */
 
+import type { Content } from '../main/vertex/types'
+
 export type PermissionMode = 'ask' | 'auto-edit' | 'auto'
 
 export type ToolName =
@@ -96,6 +98,8 @@ export type AgentEvent =
   | { type: 'autopilot'; running: boolean; reason?: string }
   | { type: 'mode'; mode: PermissionMode }
   | { type: 'changes'; files: string[]; canUndo: boolean }
+  /** The whole conversation was re-read (cloud attach or catch-up): rebuild the transcript from it. */
+  | { type: 'history-reload'; history: Content[] }
   | {
       type: 'activity'
       id: string

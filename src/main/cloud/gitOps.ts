@@ -1,14 +1,14 @@
 import { spawn } from 'node:child_process'
 import { constants as fsc } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, realpath, writeFile } from 'node:fs/promises'
-import { join, sep } from 'node:path'
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { join, resolve as resolvePath, sep } from 'node:path'
 import type { CloudDiff, CloudDiffFile } from '../../shared/cloud'
 import { redact } from '../safety/redact'
 import type { GitOps } from './protocol'
 import { isSafeBranchName } from './repoRef'
 
 export interface CliGitOpsOptions {
-  /** Server-owned directory outside any session workspace; holds the askpass script and an empty HOME. */
+  /** Server-owned directory outside any session workspace; holds an empty HOME and, per call, a private temp directory. */
   workDir: string
   gitBin?: string
   /** Tests only: allow `file://` and absolute-path remotes (a local bare repository). */
@@ -40,6 +40,9 @@ const ALLOWED_CONFIG_KEYS = new Set([
 ])
 const ALLOWED_BRANCH_KEY = /^branch\..+\.(?:remote|merge)$/
 
+/** Where the pristine push repository keeps the branch it fetched from the workspace. */
+const PUSH_REF = 'refs/heads/arc-push'
+
 const TAMPERED = 'The repository settings were changed during the session, so ARC did not push.'
 
 const SECRET_NAME = [
@@ -68,6 +71,8 @@ esac
 interface RunOpts {
   cwd?: string
   token?: string
+  /** Set internally: the per-call askpass script that answers with the token. */
+  askpass?: string
   timeoutMs: number
   input?: string
   /** Exit codes that are a normal answer rather than a failure. */
@@ -127,28 +132,42 @@ export class CliGitOps implements GitOps {
   private get home(): string {
     return join(this.workDir, 'home')
   }
-  private get askpass(): string {
-    return join(this.workDir, 'askpass.sh')
-  }
-
   private ensureSetup(): Promise<void> {
-    this.setup ??= (async () => {
-      await mkdir(this.home, { recursive: true, mode: 0o700 })
-      try {
-        await writeFile(this.askpass, ASKPASS, { flag: 'wx', mode: 0o700 })
-        await chmod(this.askpass, 0o700)
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
-      }
-    })().catch((e: unknown) => {
-      this.setup = null
-      throw e
-    })
+    this.setup ??= mkdir(this.home, { recursive: true, mode: 0o700 })
+      .then(() => undefined)
+      .catch((e: unknown) => {
+        this.setup = null
+        throw e
+      })
     return this.setup
   }
 
+  /** A fresh directory (mode 0700) under workDir for one call. Callers remove it in `finally`. */
+  private async tempDir(prefix: string): Promise<string> {
+    await this.ensureSetup()
+    const dir = await mkdtemp(join(this.workDir, prefix))
+    await chmod(dir, 0o700)
+    return dir
+  }
+
+  /**
+   * The askpass script is written fresh for one network call (mode 0500, in its own 0700 directory) and the
+   * directory is deleted afterwards, so there is no persistent file for anything to replace.
+   */
+  private async withAskpass<T>(fn: (askpass: string) => Promise<T>): Promise<T> {
+    const dir = await this.tempDir('ask-')
+    try {
+      const script = join(dir, 'askpass.sh')
+      await writeFile(script, ASKPASS, { flag: 'wx', mode: 0o500 })
+      await chmod(script, 0o500)
+      return await fn(script)
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined)
+    }
+  }
+
   /** Built from scratch: nothing from the server's environment except PATH, and the token only when `token` is given. */
-  private env(token?: string): Record<string, string> {
+  private env(token?: string, askpass?: string): Record<string, string> {
     const env: Record<string, string> = {
       PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
       HOME: this.home,
@@ -156,11 +175,13 @@ export class CliGitOps implements GitOps {
       GIT_CONFIG_SYSTEM: '/dev/null',
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_TERMINAL_PROMPT: '0',
-      GIT_ASKPASS: this.askpass,
       LC_ALL: 'C',
       GIT_OPTIONAL_LOCKS: '0',
     }
-    if (token) env.ARC_GIT_TOKEN = token
+    if (token && askpass) {
+      env.ARC_GIT_TOKEN = token
+      env.GIT_ASKPASS = askpass
+    }
     return env
   }
 
@@ -184,13 +205,18 @@ export class CliGitOps implements GitOps {
     return redact(text, secrets).replace(/(\w+:\/\/)[^/@\s]*@/g, '$1')
   }
 
-  private run(args: string[], o: RunOpts, extra: string[] = []): Promise<RunResult> {
-    return this.ensureSetup().then(
-      () =>
-        new Promise<RunResult>((resolve, reject) => {
+  private async run(args: string[], o: RunOpts, extra: string[] = []): Promise<RunResult> {
+    await this.ensureSetup()
+    if (o.token && !o.askpass) return this.withAskpass((askpass) => this.spawnGit(args, { ...o, askpass }, extra))
+    return this.spawnGit(args, o, extra)
+  }
+
+  private spawnGit(args: string[], o: RunOpts, extra: string[]): Promise<RunResult> {
+    return (
+      new Promise<RunResult>((resolve, reject) => {
           const child = spawn(this.gitBin, [...this.globalArgs(), ...extra, ...args], {
             cwd: o.cwd,
-            env: this.env(o.token),
+            env: this.env(o.token, o.askpass),
             stdio: [o.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
             detached: true,
           })
@@ -228,10 +254,11 @@ export class CliGitOps implements GitOps {
             const stderr = Buffer.concat(err).toString('utf8')
             const result = { code: code ?? 1, stdout: Buffer.concat(out).toString('utf8'), stderr }
             if (result.code === 0 || o.okCodes?.includes(result.code)) return resolve(result)
-            reject(new Error(this.explain(o.label, stderr, o.token)))
+            // `push --porcelain` reports a rejection (and its reason) on stdout.
+            reject(new Error(this.explain(o.label, `${stderr}\n${result.stdout.slice(0, 4096)}`, o.token)))
           })
           if (o.input !== undefined && child.stdin) child.stdin.end(o.input)
-        }),
+        })
     )
   }
 
@@ -243,7 +270,7 @@ export class CliGitOps implements GitOps {
   private explain(label: string, stderr: string, token?: string): string {
     const s = this.scrub(stderr, token)
     const l = s.toLowerCase()
-    if (/non-fast-forward|fetch first|\(fast-forward\)/.test(l)) {
+    if (/non-fast-forward|fetch first|\(fast-forward\)|updates were rejected/.test(l)) {
       return 'The branch on GitHub has commits this session does not have (not a fast-forward), so ARC did not overwrite it. ARC never force-pushes. Start a new cloud session or merge the branch on GitHub.'
     }
     if (/authentication failed|could not read (username|password)|invalid username|terminal prompts disabled|permission denied|returned error: 40[13]/.test(l)) {
@@ -429,6 +456,7 @@ export class CliGitOps implements GitOps {
     const all = [...files.values(), ...untracked.filter((p) => !files.has(p)).map((path): CloudDiffFile => ({ path, status: 'untracked', additions: 0, deletions: 0 }))]
     all.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
     const capped = all.slice(0, MAX_FILES)
+    const truncated = all.length > MAX_FILES
     for (const f of capped) if (f.status === 'untracked') f.additions = await this.countLines(dir, f.path)
 
     return {
@@ -438,6 +466,7 @@ export class CliGitOps implements GitOps {
       uncommitted,
       ahead: Number.parseInt(ahead.stdout.trim(), 10) || 0,
       pushed: opts.pushedHead !== null && opts.pushedHead === head && !uncommitted,
+      ...(truncated ? { truncated: true } : {}),
     }
   }
 
@@ -468,7 +497,7 @@ export class CliGitOps implements GitOps {
     token: string
     branch: string
     message: string
-  }): Promise<{ commit: string | null; pushed: true; skipped: string[]; head: string }> {
+  }): Promise<{ commit: string | null; pushed: boolean; skipped: string[]; head: string }> {
     const { dir } = opts
     this.checkRemote(opts.httpsUrl)
     if (!isSafeBranchName(opts.branch)) fail('That branch name is not allowed. ARC only pushes branches that start with arc/.')
@@ -496,14 +525,30 @@ export class CliGitOps implements GitOps {
     await this.assertRealGitDir(dir)
     await this.assertConfigClean(dir, opts.httpsUrl)
 
-    const head = await this.head(dir)
-    await this.run(['push', '--no-verify', '--no-recurse-submodules', '--', opts.httpsUrl, `HEAD:refs/heads/${opts.branch}`], {
-      cwd: dir,
-      token: opts.token,
-      timeoutMs: this.pushMs,
-      label: 'pushing the branch',
-    })
-    return { commit: committed ? await this.head(dir, true) : null, pushed: true, skipped, head }
+    // The network call never reads anything the agent can write. The branch is copied into a repository
+    // created just now (its config, hooks and askpass script never exist where the agent can reach them) over
+    // the local file protocol with no token in the environment; only that copy talks to GitHub.
+    const tmp = await this.tempDir('push-')
+    try {
+      const repo = join(tmp, 'repo.git')
+      await this.run(['init', '--bare', '--quiet', '--template=', '--', repo], { cwd: tmp, timeoutMs: this.localMs, label: 'preparing the push' })
+      await this.run(
+        ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', '--update-shallow', '--no-recurse-submodules', '--', resolvePath(dir), `+HEAD:${PUSH_REF}`],
+        { cwd: repo, timeoutMs: this.pushMs, label: 'preparing the push' },
+        ['-c', 'protocol.file.allow=always'],
+      )
+      const head = (await this.local(repo, ['rev-parse', '--verify', PUSH_REF], { label: 'reading the current commit' })).stdout.trim()
+      const pushed = await this.run(
+        ['push', '--porcelain', '--no-verify', '--no-recurse-submodules', '--', opts.httpsUrl, `${PUSH_REF}:refs/heads/${opts.branch}`],
+        { cwd: repo, token: opts.token, timeoutMs: this.pushMs, label: 'pushing the branch' },
+      )
+      // Porcelain lines: "=\t..." is "up to date"; " " (fast-forward) and "*" (new ref) mean something was sent.
+      const sent = pushed.stdout.split('\n').some((l) => l.startsWith(' \t') || l.startsWith('*\t'))
+      const short = (await this.local(repo, ['rev-parse', '--short', '--verify', PUSH_REF], { label: 'reading the current commit' })).stdout.trim()
+      return { commit: committed ? short : null, pushed: sent, skipped, head }
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => undefined)
+    }
   }
 
   /** Unstage newly added files that look like secrets or are very large. Returns their paths. */

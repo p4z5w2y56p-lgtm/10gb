@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { CLOUD_BRANCH_PREFIX, type CloudDiff, type CloudSessionInfo, type PullRequestResult, type PushResult } from '../../shared/cloud'
 import type { IpcResult } from '../../shared/channels'
 import { IPC_SCHEMAS, type IpcSchemas } from '../../shared/ipc'
-import type { AgentEvent, PermissionMode } from '../../shared/types'
+import type { AgentEvent, ApprovalRequest, PermissionMode } from '../../shared/types'
 import { BackendApp, NoProjectError, NotReadyError } from '../backend'
 import { redact } from '../safety/redact'
 import { MemoryKeyStore, type Cipher } from '../store/secrets'
@@ -17,6 +17,7 @@ import {
   type CreateSessionBody,
   type GitOps,
   type GithubApi,
+  type HistoryResponse,
   type PrBody,
 } from './protocol'
 import { isSafeBranchName, makeBranchName, parseRepoRef } from './repoRef'
@@ -50,6 +51,8 @@ export interface WorkerDeps {
   makeId?: () => string
   /** Replay buffer limits per session (tests shrink them). */
   eventLog?: EventLogOptions
+  /** Receives one redacted line per problem worth an operator's attention (a failed save before a delete). Defaults to stderr. */
+  logger?: (line: string) => void
 }
 
 const ID_RE = /^[a-f0-9-]{36}$/
@@ -59,6 +62,7 @@ const EDITING_TOOLS = new Set(['Edit', 'Write', 'Bash'])
 const SHUTDOWN_WAIT_MS = 6000
 const REMOVE_WAIT_MS = 5000
 const MARK = '[REDACTED]'
+const WORKSPACE = '<workspace>'
 
 /** The key store is injected, so the encrypted store (and its cipher) is never used on the worker. */
 const NO_CIPHER: Cipher = {
@@ -116,6 +120,12 @@ class Session {
   /** The newest prompt came from Autopilot, so the invoke-tracked text is stale. */
   autopilotTurn = false
   lastUserText: string | null = null
+  /** What the agent is waiting on, tracked from the events it emitted (they cannot be replayed from the history). */
+  pendingApproval: ApprovalRequest | null = null
+  pendingQuestion: { id: string; question: string; options?: string[] } | null = null
+  /** Assistant text streamed since the last message that reached the history, and the history length it started at. */
+  inflightText = ''
+  inflightBase = -1
   /** Edit, Write or Bash ran since the last push. */
   dirty = false
   editEpoch = 0
@@ -234,7 +244,7 @@ export class CloudWorker {
 
   // ---------------------------------------------------------------- create
 
-  async create(body: CreateSessionBody): Promise<CloudSessionInfo> {
+  async create(body: CreateSessionBody, signal?: AbortSignal): Promise<CloudSessionInfo> {
     if (this.sessions.size + this.creatingIds.size >= this.maxSessions) {
       throw new WorkerError('too-many-sessions', 429, `This worker already runs ${this.maxSessions} sessions. End one first.`)
     }
@@ -244,18 +254,21 @@ export class CloudWorker {
     }
     this.creatingIds.add(id)
     try {
-      return await this.createChecked(id, body)
+      return await this.createChecked(id, body, signal)
     } finally {
       this.creatingIds.delete(id)
     }
   }
 
-  private async createChecked(id: string, body: CreateSessionBody): Promise<CloudSessionInfo> {
+  private async createChecked(id: string, body: CreateSessionBody, signal?: AbortSignal): Promise<CloudSessionInfo> {
     const { apiKey, githubToken } = body.secrets
     const secrets = [apiKey, githubToken]
     const fail = (code: 'git' | 'github', err: unknown): never => {
       throw new WorkerError(code, 502, redact(message(err), secrets).slice(0, 500))
     }
+
+    const cancelled = (): WorkerError => new WorkerError('invalid', 400, 'The request was cancelled before the session was ready.')
+    if (signal?.aborted) throw cancelled()
 
     let ref: ReturnType<typeof parseRepoRef>
     try {
@@ -268,6 +281,7 @@ export class CloudWorker {
     }
 
     const repo = await this.deps.github.getRepo({ owner: ref.owner, name: ref.name, token: githubToken }).catch((err) => fail('github', err))
+    if (signal?.aborted) throw cancelled()
     if (!repo.canPush) {
       throw new WorkerError(
         'forbidden',
@@ -285,8 +299,9 @@ export class CloudWorker {
     try {
       await mkdir(workDir, { recursive: true })
       const cloned = await this.deps.git
-        .clone({ httpsUrl: ref.httpsUrl, dir: s.repoDir, token: githubToken, baseBranch, branch })
+        .clone({ httpsUrl: ref.httpsUrl, dir: s.repoDir, token: githubToken, baseBranch, branch, ...(signal ? { signal } : {}) })
         .catch((err) => fail('git', err))
+      if (signal?.aborted) throw cancelled()
       s.head = cloned.head
       const keyStore = new MemoryKeyStore()
       await keyStore.setApiKey(apiKey)
@@ -301,12 +316,15 @@ export class CloudWorker {
         vertexSleep: this.deps.vertexSleep,
         sandboxAvailable: false,
         trustContainer: true,
+        extraProtectedPaths: [join(this.deps.dataDir, 'git'), join(this.deps.dataDir, 'sessions')],
       })
       s.app = app
       await app.init()
       await app.saveSettings({ ...body.settings, extraDirs: [] } as SettingsPatch)
       await app.openProject(s.repoDir)
       s.autoPush = body.autoPush
+      // Last look before the session becomes visible: nobody is waiting for it any more.
+      if (signal?.aborted) throw cancelled()
     } catch (err) {
       s.closed = true
       await this.deleteFiles(id)
@@ -319,9 +337,51 @@ export class CloudWorker {
 
   // ---------------------------------------------------------------- events
 
+  /** A path inside the clone as the repository shows it; anything else is left alone. */
+  private relative(s: Session, p: string): string {
+    const prefix = s.repoDir.endsWith(sep) ? s.repoDir : s.repoDir + sep
+    if (p === s.repoDir) return '.'
+    return p.startsWith(prefix) ? p.slice(prefix.length) : p
+  }
+
+  private track(s: Session, event: AgentEvent): void {
+    switch (event.type) {
+      case 'text-delta': {
+        const len = s.app.getHistory().length
+        if (len !== s.inflightBase) {
+          s.inflightText = ''
+          s.inflightBase = len
+        }
+        s.inflightText += event.text
+        break
+      }
+      case 'approval-request':
+        s.pendingApproval = event.request
+        break
+      case 'tool-start':
+      case 'tool-result':
+        if (s.pendingApproval?.call.id === event.id) s.pendingApproval = null
+        break
+      case 'activity':
+        if (event.state !== 'running' && s.pendingApproval?.call.id === event.id) s.pendingApproval = null
+        break
+      case 'question':
+        s.pendingQuestion = { id: event.id, question: event.question, ...(event.options ? { options: event.options } : {}) }
+        break
+      case 'turn-end':
+        s.pendingApproval = null
+        s.pendingQuestion = null
+        s.inflightText = ''
+        s.inflightBase = -1
+        break
+    }
+  }
+
   private record(s: Session, event: AgentEvent): void {
     if (s.closed) return
     this.touch(s)
+    this.track(s, event)
+    if (event.type === 'changes') event = { ...event, files: event.files.map((f) => this.relative(s, f)) }
     switch (event.type) {
       case 'mode':
         s.mode = event.mode
@@ -363,10 +423,16 @@ export class CloudWorker {
     }
   }
 
-  history(id: string): { history: Content[]; seq: number } {
+  /** Transcript, event seq and the state the stream cannot replay, all read in one synchronous step. */
+  history(id: string): HistoryResponse {
     const s = this.lookup(id)
     this.touch(s)
-    return { history: s.scrub(s.app.getHistory()), seq: s.log.current() }
+    const history: Content[] = s.app.getHistory()
+    const pending: HistoryResponse['pending'] = {}
+    if (s.pendingApproval) pending.approval = s.scrub(s.pendingApproval)
+    if (s.pendingQuestion) pending.question = s.scrub(s.pendingQuestion)
+    const inflight = s.inflightText !== '' && s.inflightBase === history.length ? { text: s.scrub(s.inflightText) } : undefined
+    return { history: s.scrub(history), seq: s.log.current(), pending, ...(inflight ? { inflight } : {}) }
   }
 
   // ---------------------------------------------------------------- invoke
@@ -391,8 +457,14 @@ export class CloudWorker {
       if (err instanceof WorkerError) throw err
       if (err instanceof Reply) return err.result
       if (err instanceof NotReadyError || err instanceof NoProjectError) return { ok: false, error: err.message, code: err.code }
-      return { ok: false, error: s.redactText(message(err)) }
+      return { ok: false, error: this.hidePaths(s.redactText(message(err))) }
     }
+  }
+
+  /** The worker's own directories mean nothing to the user and say how the host is laid out. */
+  private hidePaths(text: string): string {
+    const dir = this.deps.dataDir
+    return dir.length > 1 ? text.split(dir).join(WORKSPACE) : text
   }
 
   private async dispatch(s: Session, channel: (typeof CLOUD_INVOKE_CHANNELS)[number], d: Record<string, unknown>): Promise<unknown> {
@@ -404,18 +476,27 @@ export class CloudWorker {
         return app.stop()
       case 'agent:approval': {
         const note = d.note as string | undefined
+        if (s.pendingApproval?.call.id === d.requestId) s.pendingApproval = null
         return app.resolveApproval(d.requestId as string, { decision: d.decision as 'allow-once' | 'always' | 'deny', ...(note ? { note } : {}) })
       }
       case 'agent:answer':
+        if (s.pendingQuestion?.id === d.questionId) s.pendingQuestion = null
         return app.resolveAnswer(d.questionId as string, d.answer as string)
       case 'agent:setMode':
         return app.setMode(d.mode as PermissionMode)
-      case 'agent:undo':
-        return app.undo()
-      case 'agent:changes':
-        return app.getChanges()
+      case 'agent:undo': {
+        const r = await app.undo()
+        return { restored: r.restored.map((f) => this.relative(s, f)), removed: r.removed.map((f) => this.relative(s, f)) }
+      }
+      case 'agent:changes': {
+        const r = await app.getChanges()
+        return { ...r, files: r.files.map((f) => this.relative(s, f)) }
+      }
       case 'settings:save': {
-        const { cloud: _c, theme: _t, showDetails: _s, extraDirs: _e, ...patch } = d.patch as Record<string, unknown>
+        const { cloud, theme: _t, showDetails: _s, extraDirs: _e, ...patch } = d.patch as Record<string, unknown>
+        // Of the cloud settings only this one matters here; the worker URL is the Mac's business.
+        const autoPush = (cloud as { autoPush?: unknown } | undefined)?.autoPush
+        if (typeof autoPush === 'boolean') s.autoPush = autoPush
         return app.saveSettings(patch as SettingsPatch)
       }
       case 'sessions:list':
@@ -470,7 +551,8 @@ export class CloudWorker {
     this.touch(s)
     const parsed = SecretsBody.safeParse(body)
     if (!parsed.success) throw new WorkerError('invalid', 400, 'Invalid secrets')
-    const { apiKey, githubToken } = parsed.data
+    const { apiKey, githubToken, clearApiKey } = parsed.data
+    if (clearApiKey) await s.app.clearApiKey()
     if (apiKey) {
       s.noteSecret(apiKey)
       await s.app.setApiKey(apiKey)
@@ -517,10 +599,8 @@ export class CloudWorker {
         throw new WorkerError('git', 502, s.redactText(message(err)).slice(0, 500))
       })
     s.head = r.head
-    if (r.pushed) {
-      s.pushedHead = r.head
-      if (s.editEpoch === epoch) s.dirty = false
-    }
+    s.pushedHead = r.head
+    if (s.editEpoch === epoch) s.dirty = false
     return {
       branch: s.branch,
       commit: r.commit ? r.commit.slice(0, 12) : null,
@@ -608,10 +688,37 @@ export class CloudWorker {
   async sweep(): Promise<void> {
     const t = this.now()
     for (const s of [...this.sessions.values()]) {
-      if (s.pending > 0 || s.sending || s.autopilotRunning || t - s.lastActiveAt <= this.idleMs) continue
+      if (!this.sweepable(s, t)) continue
       const st = await s.app.status().catch(() => null)
       if (st?.busy) continue
-      if (this.sessions.get(s.id) === s) await this.dispose(s)
+      if (s.dirty && !(await this.saveBeforeDelete(s))) continue
+      // The push took a while: somebody may have come back, so look again before deleting.
+      if (this.sessions.get(s.id) === s && this.sweepable(s, this.now())) await this.dispose(s)
+    }
+  }
+
+  /** Nobody is attached, nothing runs or is queued, and it has been quiet for longer than idleMs. */
+  private sweepable(s: Session, t: number): boolean {
+    return !s.closed && s.subscribers === 0 && s.pending === 0 && !s.sending && !s.autopilotRunning && t - s.lastActiveAt > this.idleMs
+  }
+
+  /** The same commit-and-push as after a turn. When it fails the session stays, so the work is not lost. */
+  private async saveBeforeDelete(s: Session): Promise<boolean> {
+    try {
+      const r = await this.enqueue(s, () => this.commitAndPush(s))
+      if (r.skipped.length > 0) this.log(`[worker] idle session ${s.id} had files left out of its last commit (secret-looking or large): ${r.skipped.join(', ')}`)
+      return true
+    } catch (err) {
+      this.log(`[worker] could not save idle session ${s.id} to GitHub, keeping it so the unpushed work is not lost: ${s.redactText(message(err))}`)
+      return false
+    }
+  }
+
+  private log(line: string): void {
+    try {
+      ;(this.deps.logger ?? ((l: string) => console.error(l)))(this.hidePaths(line))
+    } catch {
+      // logging must never break the sweep
     }
   }
 

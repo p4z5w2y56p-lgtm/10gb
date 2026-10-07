@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -40,18 +40,42 @@ function int(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number
   return n
 }
 
+/**
+ * The worker token. ARC_CLOUD_TOKEN_FILE (a path, for example a mounted secret) wins over ARC_CLOUD_TOKEN: a file is not in
+ * /proc/<pid>/environ, an environment variable is. Read once; surrounding whitespace is trimmed. Messages never contain the value.
+ */
+async function readToken(env: NodeJS.ProcessEnv): Promise<string> {
+  const tooShort = (name: string): ConfigError =>
+    new ConfigError(`${name} must hold a token of at least ${MIN_TOKEN_CHARS} characters. Generate one with: openssl rand -hex 32`)
+  const file = env.ARC_CLOUD_TOKEN_FILE?.trim()
+  if (file) {
+    let content: string
+    try {
+      content = await readFile(file, 'utf8')
+    } catch {
+      throw new ConfigError(`ARC_CLOUD_TOKEN_FILE could not be read (${file}). Check that the file exists and the worker may read it.`)
+    }
+    const token = content.trim()
+    if (token.length < MIN_TOKEN_CHARS) throw tooShort('ARC_CLOUD_TOKEN_FILE')
+    return token
+  }
+  const token = env.ARC_CLOUD_TOKEN ?? ''
+  if (token.length < MIN_TOKEN_CHARS) {
+    throw new ConfigError(
+      `ARC_CLOUD_TOKEN (or ARC_CLOUD_TOKEN_FILE) is required and must be at least ${MIN_TOKEN_CHARS} characters. Generate one with: openssl rand -hex 32`,
+    )
+  }
+  return token
+}
+
 /** Read the configuration, build everything and listen. Throws ConfigError before touching the disk or network when a setting is wrong. */
 export async function startWorker(env: NodeJS.ProcessEnv, deps: StartDeps = {}): Promise<WorkerHandle> {
   const log = deps.log ?? ((line: string) => console.log(line))
 
-  const token = env.ARC_CLOUD_TOKEN ?? ''
-  if (token.length < MIN_TOKEN_CHARS) {
-    throw new ConfigError(
-      `ARC_CLOUD_TOKEN is required and must be at least ${MIN_TOKEN_CHARS} characters. Generate one with: openssl rand -hex 32`,
-    )
-  }
+  const token = await readToken(env)
   // Out of the environment at once, so nothing the agent starts can inherit it.
   delete env.ARC_CLOUD_TOKEN
+  delete env.ARC_CLOUD_TOKEN_FILE
 
   const port = int(env, 'PORT', 8080, 0, 65535)
   const maxSessions = int(env, 'ARC_MAX_SESSIONS', 4, 1, 64)

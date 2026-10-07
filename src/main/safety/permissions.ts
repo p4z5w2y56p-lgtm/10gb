@@ -2,7 +2,7 @@ import { basename, isAbsolute, resolve } from 'node:path'
 import type { AllowRule, PermissionMode, ToolCall, ToolName, Verdict } from '../../shared/types'
 import { classifyBash, splitSegments } from './bashGuard'
 import { realpathOrAncestor, resolveInside } from './pathSandbox'
-import { isProtectedWrite, isSensitiveRead, sensitiveReadPaths } from './protected'
+import { isProcSecret, isProtectedWrite, isSensitiveRead, sensitiveReadPaths } from './protected'
 
 export interface DecisionContext {
   mode: PermissionMode
@@ -33,6 +33,7 @@ const TOOLS = new Set<string>([
 const allow = (reason: string, via?: Verdict['via']): Verdict => ({ verdict: 'allow', reason, via })
 const ask = (reason: string): Verdict => ({ verdict: 'ask', reason })
 const deny = (reason: string): Verdict => ({ verdict: 'deny', reason })
+const PROC_DENY = "Blocked: reading another process's memory, environment or files is off limits"
 
 /** First two tokens of the command, used as the scope of an "always allow" rule. */
 export function commandPrefixForRule(cmd: string): string {
@@ -86,11 +87,15 @@ async function decideRead(call: ToolCall, ctx: DecisionContext): Promise<Verdict
   const target = str(call.args.file_path) ?? str(call.args.path) ?? '.'
   const sensitive = ctx.sensitivePaths ?? sensitiveReadPaths(ctx.home, '')
   const abs = isAbsolute(target) ? resolve(target) : resolve(ctx.projectRoot, target)
+  if (isProcSecret(abs)) return deny(PROC_DENY)
   if (isSensitiveRead(abs, sensitive, ctx.caseInsensitive)) return ask(`This looks like a credential file: ${target}`)
   const r = await resolveInside(ctx.projectRoot, target, {
     extraDirs: ctx.extraDirs,
     caseInsensitive: ctx.caseInsensitive,
   })
+  // A link inside the project can lead to /proc/<pid>/environ; the sandbox verdict alone would only ask.
+  const real = r.ok ? r.real : await realpathOrAncestor(abs).catch(() => null)
+  if (real !== null && isProcSecret(real)) return deny(PROC_DENY)
   if (!r.ok) return r.reason.startsWith('Cannot resolve') ? deny(r.reason) : ask(`Reads outside the project: ${target}`)
   if (isSensitiveRead(r.real, sensitive, ctx.caseInsensitive)) return ask(`This resolves to a credential file: ${target}`)
   return allow('read inside the project')
@@ -136,10 +141,13 @@ async function decideBash(call: ToolCall, ctx: DecisionContext): Promise<Verdict
       } catch {
         return ask(`Could not verify where this path leads: ${p}`)
       }
+      if (isProcSecret(real)) return deny(PROC_DENY)
       if (isSensitiveRead(real, sensitive, ctx.caseInsensitive)) return ask(`This resolves to a credential file: ${p}`)
     }
     return allow('read-only command', 'readonly')
   }
+  // Names a credential or protected location: asked in every mode, and no saved rule can pre-approve it.
+  if (cls.sensitive) return ask('This command touches a credential or protected location')
   if (ruleAllows(call, ctx)) return allow('matches an always-allow rule', 'rule')
   if (ctx.mode === 'auto') {
     return ctx.sandboxAvailable

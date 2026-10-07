@@ -13,8 +13,10 @@ RUN npm run build:worker
 
 FROM node:22-bookworm-slim
 # git: clone and push. ripgrep, bash, curl: what the agent's Grep and Bash tools expect to find.
+# tini: PID 1 that reaps the agent's orphaned child processes and forwards SIGTERM to node.
+# python3, pip, make, g++: so common npm packages with native addons (node-gyp) and pip installs build.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ripgrep bash ca-certificates curl \
+ && apt-get install -y --no-install-recommends git ripgrep bash ca-certificates curl tini python3 python3-pip python3-venv make g++ \
  && rm -rf /var/lib/apt/lists/*
 # Not root: the agent's shell runs as this user. /data holds clones and session files.
 RUN useradd --uid 10001 --create-home --home-dir /home/arc --shell /bin/bash arc \
@@ -29,4 +31,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 USER arc
+# tini as init. With plain `docker run --init` the same thing happens on top; both together are harmless.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "worker.mjs"]

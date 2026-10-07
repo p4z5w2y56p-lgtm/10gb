@@ -19,7 +19,7 @@ import type { Settings, SettingsPatch } from '../store/settings'
 import type { Content } from '../vertex/types'
 import { CloudClient, CloudError, type AttachHandle } from './client'
 import { checkGithubToken } from './github'
-import type { CreateSessionBody, InvokeBody } from './protocol'
+import type { CreateSessionBody, HistoryResponse, InvokeBody } from './protocol'
 
 /** The half of Backend that BackendApp implements itself (everything except the cloud methods), plus its transcript. */
 export type LocalBackend = Omit<Backend, Extract<keyof Backend, `cloud${string}`>> & { getHistory(): Content[] }
@@ -50,6 +50,9 @@ interface Attachment {
   lost: boolean
   /** The user is ending this session on the worker; its stream closing is not news. */
   ending: boolean
+  /** A refresh of `info` is running; `again` asks for one more when it ends (bursts of events share requests). */
+  refreshing: boolean
+  again: boolean
 }
 
 const GONE_NOTICE = 'The cloud session ended because the worker restarted. Your pushed branch is safe on GitHub.'
@@ -63,11 +66,14 @@ const NO_GITHUB = 'Add a GitHub token in Settings > Cloud first.'
 
 const display = (info: CloudSessionInfo): string => `${info.repo} @ ${info.branch}`
 
-/** What the worker's settings:save takes: everything except the fields that only matter on this Mac. */
+/** What the worker's settings:save takes: everything except the fields that only matter on this Mac (and cloud.autoPush is the one cloud field it takes). */
 function forWorker(patch: SettingsPatch): SettingsPatch {
-  const { cloud: _cloud, theme: _theme, showDetails: _showDetails, extraDirs: _extraDirs, ...rest } = patch
-  if (rest.prompter && Object.keys(rest.prompter).length === 0) delete rest.prompter
-  return rest
+  const { cloud, theme: _theme, showDetails: _showDetails, extraDirs: _extraDirs, ...rest } = patch
+  const out: SettingsPatch = rest
+  if (out.prompter && Object.keys(out.prompter).length === 0) delete out.prompter
+  // Of the cloud settings the running session only needs to know whether to push after each turn.
+  if (cloud && typeof cloud.autoPush === 'boolean') out.cloud = { autoPush: cloud.autoPush }
+  return out
 }
 
 /**
@@ -119,7 +125,13 @@ export class BackendRouter implements Backend {
     const a = this.att
     if (!a) return this.local.send(text)
     if (!(await this.keys.hasApiKey())) throw new NotReadyError()
-    await this.call(a, 'agent:send', { text })
+    try {
+      await this.call(a, 'agent:send', { text })
+    } catch (err) {
+      // Somebody else's turn is running: the session is busy, whatever this window believed.
+      if (err instanceof CloudError && err.code === 'busy' && this.att === a) a.info = { ...a.info, busy: true }
+      throw err
+    }
     if (this.att === a) a.info = { ...a.info, busy: true }
     return 'started'
   }
@@ -194,14 +206,17 @@ export class BackendRouter implements Backend {
 
   // ------------------------------------------------------------------ local only
 
+  // A failing open must leave things as they were, so the cloud session is only left once the local one is open.
   async openProject(path: string, resumeId?: string): Promise<OpenedProject> {
+    const opened = await this.local.openProject(path, resumeId)
     this.detach()
-    return this.local.openProject(path, resumeId)
+    return opened
   }
 
   async resumeSession(id: string): Promise<OpenedProject> {
+    const opened = await this.local.resumeSession(id)
     this.detach()
-    return this.local.resumeSession(id)
+    return opened
   }
 
   // ------------------------------------------------------------------ app level
@@ -241,7 +256,15 @@ export class BackendRouter implements Backend {
   async clearApiKey(): Promise<BackendStatus> {
     await this.local.clearApiKey()
     const a = this.att
-    if (a) await this.call(a, 'agent:stop').catch(() => undefined)
+    if (a) {
+      await this.call(a, 'agent:stop').catch(() => undefined)
+      try {
+        // The worker holds its own copy of the key; without this it would keep using it.
+        await this.remote(a, () => a.client.putSecrets(a.info.id, { clearApiKey: true }))
+      } catch (err) {
+        this.notice('warn', `The key was removed here, but the cloud session could not forget it: ${(err as Error).message}`)
+      }
+    }
     return this.status()
   }
 
@@ -372,7 +395,13 @@ export class BackendRouter implements Backend {
         autoPush: settings.cloud.autoPush,
       }
       const info = await this.remote(null, () => client.create(body))
-      return this.attachTo(client, info)
+      try {
+        return await this.attachTo(client, info)
+      } catch (err) {
+        // The session exists on the worker but nobody will ever hold its id: do not leave it running.
+        if (this.att?.info.id !== info.id) await client.remove(info.id).catch(() => undefined)
+        throw err
+      }
     })
   }
 
@@ -430,7 +459,7 @@ export class BackendRouter implements Backend {
 
   /** Quit: let go of the stream and the local agent. The cloud turn and session keep running on the worker. */
   async dispose(): Promise<void> {
-    this.detach()
+    this.detach(true)
     await this.local.stop()
   }
 
@@ -462,23 +491,57 @@ export class BackendRouter implements Backend {
 
   /** Load the transcript first, so a failure leaves the current attachment untouched, then switch over. */
   private async attachTo(client: CloudClient, info: CloudSessionInfo): Promise<Opened> {
-    const { history, seq } = await this.remote(null, () => client.history(info.id))
+    const snapshot = await this.remote(null, () => client.history(info.id))
     this.detach()
-    const a: Attachment = { client, info, seq, stream: null, gen: 0, lost: false, ending: false }
+    const a: Attachment = { client, info, seq: snapshot.seq, stream: null, gen: 0, lost: false, ending: false, refreshing: false, again: false }
     this.att = a
-    this.stream(a, seq)
-    if (info.mode) this.emit({ type: 'mode', mode: info.mode })
-    return { root: display(info), sessionId: info.id, history, cloud: info }
+    this.catchUp(a, snapshot, info.busy ? 'busy' : 'idle')
+    this.stream(a, snapshot.seq)
+    return { root: display(info), sessionId: info.id, history: snapshot.history, cloud: info }
   }
 
-  /** Close the stream and forget the session. It keeps running on the worker. */
-  private detach(): void {
+  /**
+   * Show the renderer what a client that had been connected all along would show: the transcript, the assistant
+   * text streamed so far, an approval or question that waits for the user, and whether a turn runs. None of that
+   * can be replayed from the event stream, which only has what happens from `snapshot.seq` on.
+   */
+  private catchUp(a: Attachment, snapshot: HistoryResponse, turn: 'busy' | 'idle' | 'ended'): void {
+    const { pending, inflight } = snapshot
+    this.emit({ type: 'history-reload', history: snapshot.history })
+    if (a.info.mode) this.emit({ type: 'mode', mode: a.info.mode })
+    if (inflight && inflight.text) this.emit({ type: 'text-delta', text: inflight.text })
+    if (pending.approval) this.emit({ type: 'approval-request', request: pending.approval })
+    if (pending.question) {
+      const { id, question, options } = pending.question
+      this.emit({ type: 'question', id, question, ...(options ? { options } : {}) })
+    }
+    const waiting = pending.approval ?? pending.question
+    // Whatever waits for the user or streams means a turn is running, whatever the session info says.
+    if (turn === 'busy' || waiting || inflight) {
+      if (pending.approval) this.emit({ type: 'status', state: 'waiting-approval', label: 'Waiting for you' })
+      else if (pending.question) this.emit({ type: 'status', state: 'waiting-answer', label: 'Waiting for your answer' })
+      else if (inflight) this.emit({ type: 'status', state: 'thinking', label: 'Thinking' })
+      else this.emit({ type: 'status', state: 'working', label: 'Working' })
+    } else {
+      this.emit({ type: 'status', state: 'idle', label: 'Idle' })
+      // The turn ended while nothing was listening: the renderer may still show it running.
+      if (turn === 'ended') this.emit({ type: 'turn-end', reason: 'done' })
+    }
+  }
+
+  /** Close the stream and forget the session. It keeps running on the worker. `quiet` skips telling the renderer. */
+  private detach(quiet = false): void {
     const a = this.att
     this.att = null
     if (!a) return
     a.gen++
     a.stream?.close()
     a.stream = null
+    // Nothing will report the end of a turn that was running there, so end it here, whatever the reason for leaving.
+    if (!quiet) {
+      this.emit({ type: 'status', state: 'idle', label: 'Idle' })
+      this.emit({ type: 'turn-end', reason: 'error' })
+    }
   }
 
   private stream(a: Attachment, after: number): void {
@@ -509,18 +572,25 @@ export class BackendRouter implements Backend {
     if (e.type === 'mode') a.info = { ...a.info, mode: e.mode }
     else if (e.type === 'turn-end') a.info = { ...a.info, busy: false }
     this.emit(e)
-    if (e.type === 'turn-end') void this.refresh(a)
+    // A notice may be "Saved to GitHub" (pushed), Autopilot starts and stops turns by itself: re-read the session.
+    if (e.type === 'turn-end' || e.type === 'notice' || e.type === 'autopilot') void this.refresh(a)
   }
 
   private async onGap(a: Attachment, gen: number): Promise<void> {
     try {
-      const { seq } = await this.remote(a, () => a.client.history(a.info.id))
+      const snapshot = await this.remote(a, () => a.client.history(a.info.id))
       if (this.att !== a || a.gen !== gen) return
+      // Read after the history: a turn that ended in between is replayed by the stream, one that ended before is seen here.
+      const info = await a.client.get(a.info.id).catch(() => null)
+      if (this.att !== a || a.gen !== gen) return
+      if (info) a.info = info
       this.notice('info', CAUGHT_UP_NOTICE)
-      this.stream(a, seq)
+      this.catchUp(a, snapshot, a.info.busy ? 'busy' : 'ended')
+      this.stream(a, snapshot.seq)
     } catch (err) {
       if (this.att !== a || a.gen !== gen) return
-      if (err instanceof CloudError && (err.code === 'session-gone' || err.code === 'unauthorized')) return
+      if (err instanceof CloudError && err.code === 'session-gone') return
+      if (err instanceof CloudError && err.code === 'unauthorized') return this.onEnded(a, 'unauthorized')
       this.notice('warn', `Could not catch up with the cloud session: ${(err as Error).message} Open it again from the Cloud list.`)
       this.detach()
     }
@@ -529,10 +599,7 @@ export class BackendRouter implements Backend {
   private onEnded(a: Attachment, reason: 'gone' | 'unauthorized'): void {
     if (this.att !== a) return
     this.detach()
-    if (reason === 'gone') {
-      this.notice('error', GONE_NOTICE)
-      this.emit({ type: 'turn-end', reason: 'error' })
-    } else this.notice('error', UNAUTHORIZED_NOTICE)
+    this.notice('error', reason === 'gone' ? GONE_NOTICE : UNAUTHORIZED_NOTICE)
   }
 
   private onState(a: Attachment, state: 'connected' | 'reconnecting'): void {
@@ -548,11 +615,23 @@ export class BackendRouter implements Backend {
 
   /** Re-read the session so busy, mode and pushed are right. A failure here is not worth reporting. */
   private async refresh(a: Attachment): Promise<void> {
+    if (a.refreshing) {
+      a.again = true
+      return
+    }
+    a.refreshing = true
     try {
-      const info = await a.client.get(a.info.id)
-      if (this.att === a) a.info = info
-    } catch {
-      // The next turn-end or reconnect will try again.
+      do {
+        a.again = false
+        try {
+          const info = await a.client.get(a.info.id)
+          if (this.att === a) a.info = info
+        } catch {
+          // The next event or reconnect will try again.
+        }
+      } while (a.again && this.att === a)
+    } finally {
+      a.refreshing = false
     }
   }
 

@@ -61,6 +61,11 @@ export interface BackendDeps {
   sandboxAvailable?: boolean
   /** The container is the sandbox (cloud worker): Auto mode may run commands unattended without sandbox-exec. */
   trustContainer?: boolean
+  /**
+   * Extra directories the agent may neither write (hard deny) nor read without approval, for the session.
+   * The cloud worker passes its own data directory so a shell cannot read the worker token or other sessions.
+   */
+  extraProtectedPaths?: string[]
 }
 
 export interface BackendStatus {
@@ -237,6 +242,7 @@ export class BackendApp {
     }
 
     const { dataDir, home } = this.deps
+    const extraProtected = (this.deps.extraProtectedPaths ?? []).filter((p) => typeof p === 'string' && p !== '')
     const tmp = await realpath(tmpdir())
     const osSandbox = this.deps.sandboxAvailable ?? detectSandboxExec()
     const sandboxAvailable = osSandbox || this.deps.trustContainer === true
@@ -294,8 +300,8 @@ export class BackendApp {
         }),
       emit: this.emit,
       home,
-      protectedPaths: protectedWritePaths(home, dataDir),
-      sensitivePaths: sensitiveReadPaths(home, dataDir),
+      protectedPaths: [...protectedWritePaths(home, dataDir), ...extraProtected],
+      sensitivePaths: [...sensitiveReadPaths(home, dataDir), ...extraProtected],
       sandboxAvailable,
       secrets: () => (this.cache ? [this.cache.key] : []),
       history,

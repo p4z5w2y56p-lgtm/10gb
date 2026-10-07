@@ -30,7 +30,9 @@ function scrub(text: string, secrets: string[]): string {
 function failure(err: unknown, secrets: string[] = []): IpcResult {
   if (err instanceof NotReadyError) return { ok: false, error: err.message, code: err.code }
   if (err instanceof NoProjectError) return { ok: false, error: err.message, code: err.code }
-  return { ok: false, error: scrub(err instanceof Error ? err.message : String(err), secrets) }
+  // A cloud session that already runs a turn: the caller must not treat the refusal as the end of that turn.
+  const busy = err instanceof Error && (err as { code?: unknown }).code === 'busy'
+  return { ok: false, error: scrub(err instanceof Error ? err.message : String(err), secrets), ...(busy ? { code: 'busy' as const } : {}) }
 }
 
 /** Values the caller just submitted: they are scrubbed from any error that comes back, whatever they look like. */

@@ -148,7 +148,8 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
   const now = opts.now ?? Date.now
   const log = opts.logger ?? ((line: string) => console.error(line))
   const limiter = new FailureLimiter(opts.failLimit?.perMinute ?? 10)
-  const streams = new Map<string, number>()
+  /** Open event streams per session, oldest first. */
+  const streams = new Map<string, Array<{ end(): void }>>()
 
   const clientAddress = (req: IncomingMessage): string => {
     if (opts.trustProxy) {
@@ -171,7 +172,25 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
       label: '/v1/sessions',
       methods: {
         GET: ({ res }) => sendJson(res, 200, worker.list()),
-        POST: async ({ res, body }) => sendJson(res, 200, await worker.create(check(CreateSessionBody, await body()))),
+        POST: async ({ res, body }) => {
+          const parsed = check(CreateSessionBody, await body())
+          // Cloning can take minutes. A client that hung up is not waiting for the session, so stop and clean up.
+          const gone = new AbortController()
+          const onClose = (): void => {
+            if (!res.writableFinished) gone.abort()
+          }
+          res.on('close', onClose)
+          try {
+            const info = await worker.create(parsed, gone.signal)
+            if (gone.signal.aborted) {
+              await worker.remove(info.id).catch(() => undefined)
+              return
+            }
+            sendJson(res, 200, info)
+          } finally {
+            res.off('close', onClose)
+          }
+        },
       },
     },
     {
@@ -238,8 +257,9 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
 
   function streamEvents({ req, res, id, query }: Ctx): void {
     worker.get(id)
-    const open = streams.get(id) ?? 0
-    if (open >= MAX_STREAMS_PER_SESSION) throw new HttpError(429, 'too-many-streams', 'Too many open streams for this session')
+    const open = streams.get(id) ?? []
+    // A half-open connection that nobody closed must not lock the client out: the oldest stream makes room.
+    while (open.length >= MAX_STREAMS_PER_SESSION) open.shift()?.end()
     const after = parseSeq(req.headers['last-event-id']) ?? parseSeq(query.get('after')) ?? 0
 
     let closed = false
@@ -252,9 +272,18 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
       closed = true
       if (timer) clearInterval(timer)
       sub?.unsubscribe()
-      const left = (streams.get(id) ?? 1) - 1
-      if (left <= 0) streams.delete(id)
-      else streams.set(id, left)
+      const list = streams.get(id)
+      if (list) {
+        const at = list.indexOf(handle)
+        if (at >= 0) list.splice(at, 1)
+        if (list.length === 0) streams.delete(id)
+      }
+    }
+    const handle = {
+      end: (): void => {
+        cleanup()
+        res.end()
+      },
     }
     const write = (chunk: string): void => {
       if (closed) return
@@ -262,7 +291,8 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
       if (res.writableLength > MAX_BUFFERED_BYTES) res.destroy()
     }
 
-    streams.set(id, open + 1)
+    open.push(handle)
+    streams.set(id, open)
     res.on('close', cleanup)
     try {
       // Replay happens inside subscribe(), before the gap is known, so hold the frames until the gap message went out.
@@ -292,6 +322,8 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
     })
     res.flushHeaders()
     req.socket.setNoDelay(true)
+    // Bytes at once, so a client that reconnected after an outage knows it is connected without waiting for an event.
+    write(': connected\n\n')
     if (sub.gap) write(`event: gap\ndata: ${JSON.stringify({ oldest: sub.gap.oldest })}\n\n`)
     for (const frame of queued) write(frame)
     queued.length = 0
@@ -314,11 +346,13 @@ export function createWorkerServer(opts: WorkerServerOptions): Server {
     }
 
     const addr = clientAddress(req)
-    const wait = limiter.blockedFor(addr, now())
-    if (wait > 0) {
-      throw new HttpError(429, 'rate-limited', 'Too many failed attempts. Try again later.', { 'Retry-After': String(Math.max(1, Math.ceil(wait / 1000))) })
-    }
+    // The failure counter only slows guessing: a correct token always gets in, so other callers' failures
+    // (or a shared address) can never lock the real client out.
     if (!authorized(req)) {
+      const wait = limiter.blockedFor(addr, now())
+      if (wait > 0) {
+        throw new HttpError(429, 'rate-limited', 'Too many failed attempts. Try again later.', { 'Retry-After': String(Math.max(1, Math.ceil(wait / 1000))) })
+      }
       limiter.record(addr, now())
       throw new HttpError(401, 'unauthorized', 'Unauthorized')
     }

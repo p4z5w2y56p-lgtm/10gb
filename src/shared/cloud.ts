@@ -50,6 +50,8 @@ export interface CloudDiff {
   /** Commits on the branch that the base branch does not have. */
   ahead: number
   pushed: boolean
+  /** True when the changed-file list was cut at the cap, so `files` is not the whole set. */
+  truncated?: boolean
 }
 
 export interface PushResult {

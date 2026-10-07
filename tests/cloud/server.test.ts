@@ -219,9 +219,9 @@ async function openStream(path: string, headers: Record<string, string> = {}): P
   return st
 }
 
-const waitFor = async (cond: () => boolean, ms = 5000) => {
+const waitFor = async (cond: () => boolean | Promise<boolean>, ms = 5000) => {
   const t0 = Date.now()
-  while (!cond()) {
+  while (!(await cond())) {
     if (Date.now() - t0 > ms) throw new Error('waitFor timed out')
     await new Promise((r) => setTimeout(r, 10))
   }
@@ -314,7 +314,7 @@ describe('authentication', () => {
     expect(r.status).toBe(401)
   })
 
-  it('rate limits failed attempts per address: 429 with Retry-After after 10 in a minute, even for the right token, then recovers', async () => {
+  it('rate limits failed attempts per address: 429 with Retry-After after 10 in a minute, then recovers', async () => {
     const { setNow } = await boot()
     for (let i = 0; i < 10; i++) expect((await api('/v1/sessions', { token: `wrong-${i}` })).status).toBe(401)
     const blocked = await api('/v1/sessions', { token: 'wrong-again' })
@@ -322,10 +322,20 @@ describe('authentication', () => {
     expect(Number(blocked.headers.get('retry-after'))).toBeGreaterThan(0)
     expect(Number(blocked.headers.get('retry-after'))).toBeLessThanOrEqual(60)
     expect(blocked.json).toMatchObject({ ok: false, code: 'rate-limited' })
-    expect((await api('/v1/sessions')).status).toBe(429)
     expect((await api('/health', { token: null })).status).toBe(200)
     setNow(5_000_000 + 61_000)
+    expect((await api('/v1/sessions', { token: 'wrong-later' })).status).toBe(401)
+  })
+
+  it('a correct token is never locked out by failed attempts from the same address', async () => {
+    await boot()
+    for (let i = 0; i < 25; i++) await api('/v1/sessions', { token: `wrong-${i}` })
+    expect((await api('/v1/sessions', { token: 'wrong-more' })).status).toBe(429)
+    const ok = await api('/v1/sessions')
+    expect(ok.status).toBe(200)
+    // and keeps working while the address stays blocked for guessers
     expect((await api('/v1/sessions')).status).toBe(200)
+    expect((await api('/v1/sessions', { token: 'wrong-after' })).status).toBe(429)
   })
 
   it('the window is rolling: failures older than a minute stop counting', async () => {
@@ -666,11 +676,12 @@ describe('event stream', () => {
   it('sends an "event: gap" message with the oldest buffered sequence when the client is too far behind', async () => {
     const { info } = await sessionWithEvents({ eventLog: { maxEvents: 5 } })
     const s = await openStream(`/v1/sessions/${info.id}/events`, { 'last-event-id': '1' })
-    await waitFor(() => s.frames.length >= 2)
-    expect(s.frames[0].event).toBe('gap')
-    const oldest = JSON.parse(s.frames[0].data!).oldest as number
+    await waitFor(() => s.frames.length >= 3)
+    expect(s.frames[0].comment).toBe('connected')
+    expect(s.frames[1].event).toBe('gap')
+    const oldest = JSON.parse(s.frames[1].data!).oldest as number
     expect(oldest).toBeGreaterThan(2)
-    expect(s.frames[1].id).toBe(String(oldest))
+    expect(s.frames[2].id).toBe(String(oldest))
     expect(s.frames.filter((f) => f.id).length).toBe(5)
   })
 
@@ -681,7 +692,7 @@ describe('event stream', () => {
     await waitFor(() => s.frames.filter((f) => f.comment === 'ping').length >= 3)
   })
 
-  it('allows 5 streams per session and answers 429 for the sixth, until one closes', async () => {
+  it('allows 5 streams per session; a sixth closes the OLDEST instead of being refused', async () => {
     const { worker } = await boot()
     const info = await createSession()
     const open: Stream[] = []
@@ -690,13 +701,25 @@ describe('event stream', () => {
       expect(s.res.status).toBe(200)
       open.push(s)
     }
-    const sixth = await api(`/v1/sessions/${info.id}/events`)
-    expect(sixth.status).toBe(429)
-    expect(sixth.json).toMatchObject({ ok: false, code: 'too-many-streams' })
-    open[0].close()
-    await waitFor(() => worker.subscriberCount(info.id) === 4)
-    const again = await openStream(`/v1/sessions/${info.id}/events`)
-    expect(again.res.status).toBe(200)
+    await waitFor(() => worker.subscriberCount(info.id) === 5)
+    const sixth = await openStream(`/v1/sessions/${info.id}/events`)
+    expect(sixth.res.status).toBe(200)
+    await waitFor(() => open[0].ended)
+    expect(open.slice(1).every((s) => !s.ended)).toBe(true)
+    await waitFor(() => worker.subscriberCount(info.id) === 5)
+    const seventh = await openStream(`/v1/sessions/${info.id}/events`)
+    expect(seventh.res.status).toBe(200)
+    await waitFor(() => open[1].ended)
+    expect(open[2].ended).toBe(false)
+    expect(sixth.ended).toBe(false)
+  })
+
+  it('writes ": connected" right after the headers, before any event', async () => {
+    await boot()
+    const info = await createSession()
+    const s = await openStream(`/v1/sessions/${info.id}/events`)
+    await waitFor(() => s.frames.length > 0)
+    expect(s.frames[0]).toMatchObject({ comment: 'connected' })
   })
 
   it('the stream cap is per session', async () => {
@@ -768,5 +791,61 @@ describe('internal errors', () => {
       (await api(`/v1/sessions/${UUID0}`)).text,
     ]
     for (const b of bodies) expect(b).not.toContain(TOKEN)
+  })
+})
+
+describe('abandoned session creation', () => {
+  async function gatedClone(b: Booted) {
+    let seen: AbortSignal | undefined
+    let started = false
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const clone = b.git.clone.bind(b.git)
+    b.git.clone = async (o) => {
+      seen = o.signal
+      started = true
+      await gate
+      return clone(o)
+    }
+    return { signal: () => seen, started: () => started, release }
+  }
+  const post = (b: Booted, signal: AbortSignal) =>
+    fetch(`${b.base}/v1/sessions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify(bodyOf()),
+      signal,
+    }).catch(() => null)
+  const leftovers = async (b: Booted) => [...(await readdir(join(b.dataDir, 'work')).catch(() => [])), ...(await readdir(join(b.dataDir, 'sessions')).catch(() => []))]
+
+  it('aborts the clone and leaves no session or files when the client hangs up', async () => {
+    const b = await boot()
+    const g = await gatedClone(b)
+    const ctl = new AbortController()
+    const p = post(b, ctl.signal)
+    await waitFor(() => g.signal() !== undefined)
+    ctl.abort()
+    await p
+    await waitFor(() => g.signal()!.aborted)
+    g.release()
+    await waitFor(async () => (await leftovers(b)).length === 0 && b.worker.list().length === 0)
+    await new Promise((r) => setTimeout(r, 100))
+    expect(b.worker.list()).toEqual([])
+    expect(await leftovers(b)).toEqual([])
+  })
+
+  it('removes the session when it was created anyway (a worker that ignores the signal)', async () => {
+    const b = await boot()
+    const orig = b.worker.create.bind(b.worker)
+    vi.spyOn(b.worker, 'create').mockImplementation((body) => orig(body))
+    const g = await gatedClone(b)
+    const ctl = new AbortController()
+    const p = post(b, ctl.signal)
+    await waitFor(() => g.started())
+    ctl.abort()
+    await p
+    await new Promise((r) => setTimeout(r, 50))
+    g.release()
+    await waitFor(async () => b.worker.list().length === 0 && (await leftovers(b)).length === 0)
   })
 })

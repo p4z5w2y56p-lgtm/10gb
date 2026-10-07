@@ -67,6 +67,49 @@ describe('startWorker', () => {
     await expect(stat(untouched)).rejects.toThrow()
   })
 
+  it('reads the token from ARC_CLOUD_TOKEN_FILE, trimmed, and prefers it over ARC_CLOUD_TOKEN', async () => {
+    dir = await realpath(await mkdtemp(join(tmpdir(), 'arc-main-')))
+    const file = join(dir, 'arc-token')
+    const FILE_TOKEN = 'FILE-token-' + 'a1b2c3d4'.repeat(4)
+    await writeFile(file, `${FILE_TOKEN}\n`)
+    const env: NodeJS.ProcessEnv = { PORT: '0', ARC_CLOUD_TOKEN_FILE: file, ARC_CLOUD_TOKEN: TOKEN, ARC_DATA_DIR: join(dir, 'data') }
+    handle = await startWorker(env, { git, github, log: () => {} })
+    expect((await fetch(url(handle, '/v1/sessions'), { headers: { authorization: `Bearer ${FILE_TOKEN}` } })).status).toBe(200)
+    expect((await fetch(url(handle, '/v1/sessions'), { headers: auth })).status).toBe(401)
+    expect(env.ARC_CLOUD_TOKEN).toBeUndefined()
+    expect(JSON.stringify(env)).not.toContain(TOKEN)
+  })
+
+  it('works with only ARC_CLOUD_TOKEN_FILE set, and reads the file once', async () => {
+    dir = await realpath(await mkdtemp(join(tmpdir(), 'arc-main-')))
+    const file = join(dir, 'arc-token')
+    await writeFile(file, `  ${TOKEN}\r\n`)
+    handle = await startWorker({ PORT: '0', ARC_CLOUD_TOKEN_FILE: file, ARC_DATA_DIR: join(dir, 'data') }, { git, github, log: () => {} })
+    await rm(file)
+    expect((await fetch(url(handle, '/v1/sessions'), { headers: auth })).status).toBe(200)
+  })
+
+  it('rejects an unreadable, missing, empty or too short token file without echoing its content, and does not fall back to the env token', async () => {
+    dir = await realpath(await mkdtemp(join(tmpdir(), 'arc-main-')))
+    const short = join(dir, 'short')
+    await writeFile(short, 'SECRETSHORT-' + 'z'.repeat(10) + '\n')
+    const empty = join(dir, 'empty')
+    await writeFile(empty, '\n')
+    for (const file of [join(dir, 'missing'), dir, short, empty]) {
+      const err = await startWorker({ PORT: '0', ARC_CLOUD_TOKEN_FILE: file, ARC_CLOUD_TOKEN: TOKEN, ARC_DATA_DIR: join(dir, 'data') }, { git, github, log: () => {} }).catch((e) => e)
+      expect(err, file).toBeInstanceOf(Error)
+      expect(String(err.message)).toMatch(/ARC_CLOUD_TOKEN_FILE/)
+      expect(String(err.message)).not.toContain('SECRETSHORT')
+      expect(String(err.message)).not.toContain(TOKEN)
+    }
+    await expect(stat(join(dir, 'data'))).rejects.toThrow()
+  })
+
+  it('treats an empty ARC_CLOUD_TOKEN_FILE setting as unset', async () => {
+    const h = await start({ ARC_CLOUD_TOKEN_FILE: '  ' })
+    expect((await fetch(url(h, '/v1/sessions'), { headers: auth })).status).toBe(200)
+  })
+
   it('accepts a token of exactly 32 characters', async () => {
     const h = await start({ ARC_CLOUD_TOKEN: 'y'.repeat(32) })
     expect((await fetch(url(h, '/health'))).status).toBe(200)

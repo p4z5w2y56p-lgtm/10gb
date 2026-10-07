@@ -11,7 +11,7 @@ import {
 } from 'react'
 import type { SettingsPatch } from '../../main/store/settings'
 import type { CloudSecretName, CloudStartRequest, PullRequestResult, PushResult } from '../../shared/cloud'
-import type { PermissionMode } from '../../shared/types'
+import type { AgentEvent, PermissionMode } from '../../shared/types'
 import { ArcError, createClient, type Arc, type ArcClient, type OpenedProject } from '../arc/client'
 import { initialState, reduce, type Action, type AppState } from './reducer'
 
@@ -66,6 +66,10 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
   const api = useMemo(() => createClient(arc), [arc])
   const stateRef = useRef(state)
   stateRef.current = state
+  /** A project or session is being opened; the reply (with its transcript) has not arrived yet. */
+  const openingRef = useRef(false)
+  /** Events that came after the router's history-reload, held until the opened transcript is on screen. */
+  const heldRef = useRef<AgentEvent[] | null>(null)
 
   const notify = useCallback(
     (level: 'info' | 'warn' | 'error', message: string) => dispatch({ type: 'event', event: { type: 'notice', level, message } }),
@@ -99,22 +103,55 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
     }
   }, [api, notify, cloudRefresh])
 
-  /** A backend call that failed: show why, free the composer, and re-check whether we are locked. */
+  /**
+   * A send that failed: show why. Only a turn that never started is ended here (no key, no project, invalid);
+   * a busy conflict means a real turn is running, which this refusal must not clear. Any other error ends the
+   * turn only when the backend confirms nothing is running.
+   */
   const failed = useCallback(
     async (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err)
       notify('error', message)
-      dispatch({ type: 'event', event: { type: 'turn-end', reason: 'error' } })
-      if (err instanceof ArcError && (err.code === 'no-api-key' || err.code === 'no-project')) await refresh()
+      const code = err instanceof ArcError ? err.code : undefined
+      if (code === 'no-api-key' || code === 'no-project' || code === 'invalid') {
+        dispatch({ type: 'event', event: { type: 'turn-end', reason: 'error' } })
+      } else if (code !== 'busy') {
+        const running = await api.status().then((s) => s.busy, () => false)
+        if (!running) dispatch({ type: 'event', event: { type: 'turn-end', reason: 'error' } })
+      }
+      if (code === 'no-api-key' || code === 'no-project') await refresh()
     },
-    [notify, refresh],
+    [api, notify, refresh],
   )
 
-  const enter = useCallback(
-    async (opened: OpenedProject) => {
-      dispatch({ type: 'reset' })
-      dispatch({ type: 'history', history: opened.history })
-      await refresh()
+  /**
+   * Open a project or session and show it. The router emits what a cloud session is doing right now (in-flight
+   * text, a pending approval) before its reply arrives, and the reply's transcript replaces the screen, which
+   * would wipe those events. So everything from the router's history-reload on is held and replayed after the
+   * transcript is shown. Whatever came before it belongs to the view being left.
+   */
+  const open = useCallback(
+    async (run: () => Promise<OpenedProject | null>): Promise<void> => {
+      openingRef.current = true
+      let opened: OpenedProject | null
+      try {
+        opened = await run()
+      } catch (err) {
+        openingRef.current = false
+        const held = heldRef.current ?? []
+        heldRef.current = null
+        for (const event of held) dispatch({ type: 'event', event })
+        throw err
+      }
+      const held = heldRef.current ?? []
+      heldRef.current = null
+      if (opened) {
+        dispatch({ type: 'reset' })
+        dispatch({ type: 'history', history: opened.history })
+      }
+      for (const event of held) dispatch({ type: 'event', event })
+      openingRef.current = false
+      if (opened) await refresh()
     },
     [refresh],
   )
@@ -157,15 +194,14 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
       },
       async chooseProject() {
         try {
-          const opened = await api.chooseProject()
-          if (opened) await enter(opened)
+          await open(() => api.chooseProject())
         } catch (err) {
           notify('error', err instanceof Error ? err.message : String(err))
         }
       },
       async openProject(path) {
         try {
-          await enter(await api.openProject(path))
+          await open(() => api.openProject(path))
         } catch (err) {
           notify('error', err instanceof Error ? err.message : String(err))
         }
@@ -174,14 +210,14 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
         const root = stateRef.current.app?.projectRoot
         if (!root) return
         try {
-          await enter(await api.openProject(root))
+          await open(() => api.openProject(root))
         } catch (err) {
           notify('error', err instanceof Error ? err.message : String(err))
         }
       },
       async resumeSession(id) {
         try {
-          await enter(await api.resumeSession(id))
+          await open(() => api.resumeSession(id))
         } catch (err) {
           notify('error', err instanceof Error ? err.message : String(err))
         }
@@ -237,13 +273,13 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
       },
       cloudRefresh,
       async cloudStart(req) {
-        await enter(await api.cloudStart(req))
+        await open(() => api.cloudStart(req))
         dispatch({ type: 'ui', patch: { cloudStartOpen: false } })
         await cloudRefresh()
       },
       async cloudAttach(id) {
         try {
-          await enter(await api.cloudAttach(id))
+          await open(() => api.cloudAttach(id))
           await cloudRefresh()
         } catch (err) {
           notify('error', err instanceof Error ? err.message : String(err))
@@ -291,10 +327,18 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
       ui: (patch) => dispatch({ type: 'ui', patch }),
       notify,
     }),
-    [api, cloudRefresh, enter, failed, notify, refresh],
+    [api, cloudRefresh, open, failed, notify, refresh],
   )
 
-  useEffect(() => api.onEvent((event) => dispatch({ type: 'event', event })), [api])
+  useEffect(
+    () =>
+      api.onEvent((event) => {
+        if (heldRef.current) heldRef.current.push(event)
+        else if (openingRef.current && event.type === 'history-reload') heldRef.current = [event]
+        else dispatch({ type: 'event', event })
+      }),
+    [api],
+  )
   useEffect(() => {
     void refresh()
   }, [refresh])

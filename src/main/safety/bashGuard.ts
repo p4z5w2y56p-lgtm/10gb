@@ -1,5 +1,5 @@
 import { basename, isAbsolute, resolve, sep } from 'node:path'
-import { isProtectedWrite, isSensitiveRead, sensitiveReadPaths } from './protected'
+import { isProcSecret, isProtectedWrite, isSensitiveRead, sensitiveReadPaths } from './protected'
 
 export interface GuardContext {
   projectRoot: string
@@ -15,7 +15,8 @@ export type BashClass =
   | { kind: 'deny'; reason: string }
   /** `paths` are the absolute paths the command reads, so callers can check symlinks. */
   | { kind: 'readonly'; paths: string[] }
-  | { kind: 'other'; unparsable: boolean }
+  /** `sensitive`: the command names a credential or protected location, so no mode may run it unasked. */
+  | { kind: 'other'; unparsable: boolean; sensitive?: boolean }
 
 interface Word {
   text: string
@@ -407,6 +408,32 @@ export function namesMetadataEndpoint(text: string): boolean {
 
 const METADATA_DENY = 'the cloud metadata service is off limits'
 
+// ----------------------------------------------------- process internals
+
+/** Parts of a /proc path: plain characters, or a $(...) / `...` substitution (which may contain spaces). */
+const PROC_PART = '(?:\\$\\([^)]*\\)|`[^`]*`|[^\\s;|&<>\'"()`])'
+const PROC_FILES = 'environ|mem|cmdline|maps|smaps|fd|fdinfo|root|cwd|exe|auxv|task'
+const PROC_TEXT = new RegExp(`/proc/(?:${PROC_PART}*/)?(?:${PROC_FILES})(?![\\w-])`, 'i')
+
+/** Whether text refers to a per-process /proc file that exposes secrets (environ, mem, cmdline, ...). */
+export function namesProcInternals(text: string): boolean {
+  return PROC_TEXT.test(text)
+}
+
+const PROC_DENY = "reading another process's memory, environment or files is off limits"
+
+const escapeRe = (t: string): string => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** Whether text contains one of the absolute credential directories as a whole path. */
+function namesSensitiveDir(text: string, sensitive: string[], caseInsensitive: boolean): boolean {
+  const t = caseInsensitive ? text.toLowerCase() : text
+  return sensitive.some((d) => {
+    if (!d.startsWith('/') || d === '/') return false
+    const dir = (caseInsensitive ? d.toLowerCase() : d).replace(/\/+$/, '')
+    return new RegExp(`(?<![\\w.~$}-])${escapeRe(dir)}(?![\\w.-])`).test(t)
+  })
+}
+
 // --------------------------------------------------------------- analysis
 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh'])
@@ -614,6 +641,7 @@ const nonFlag = (args: Word[]): Word[] => args.filter((a) => a.dynamic || !a.tex
 
 interface Analysis {
   deny: string | null
+  sensitive: boolean
   unparsable: boolean
   readonly: boolean
   readonlyPaths: string[]
@@ -664,7 +692,7 @@ function readonlyPaths(c: Cmd, ctx: GuardContext, sensitive: string[], cwd: stri
 }
 
 function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string | null): Analysis {
-  const out: Analysis = { deny: null, unparsable: false, readonly: false, readonlyPaths: [] }
+  const out: Analysis = { deny: null, sensitive: false, unparsable: false, readonly: false, readonlyPaths: [] }
   const reads: string[] = []
   if (depth > 3) {
     out.unparsable = true
@@ -683,7 +711,16 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
     out.deny = METADATA_DENY
     return out
   }
+  const wordTexts = P.segments.flatMap((s) => s.words.map((w) => w.text.split(PLACEHOLDER).join('')))
+  if (namesProcInternals(cmd) || wordTexts.some(namesProcInternals)) {
+    out.deny = PROC_DENY
+    return out
+  }
   const sensitive = ctx.sensitivePaths ?? sensitiveReadPaths(ctx.home, '')
+  // A program we cannot read (python -c, tar, grep -r) can still name a credential directory in its text.
+  if (namesSensitiveDir(cmd, sensitive, ctx.caseInsensitive === true) || wordTexts.some((t) => namesSensitiveDir(t, sensitive, ctx.caseInsensitive === true))) {
+    out.sensitive = true
+  }
   let cwd = startCwd
   let allReadonly = P.segments.length > 0 && !P.hasSubstitution && !P.unparsable
   out.unparsable = P.unparsable
@@ -715,6 +752,7 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
         allReadonly = false
         continue
       }
+      if (isProcSecret(p)) return deny(PROC_DENY)
       if (r.kind === 'out') {
         if (isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive)) {
           return deny(`write to a protected path: ${r.target.text}`)
@@ -722,6 +760,7 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
         if (p !== '/dev/null') allReadonly = false
       } else if (isSensitiveRead(p, sensitive, ctx.caseInsensitive)) {
         allReadonly = false
+        out.sensitive = true
       } else {
         reads.push(p)
       }
@@ -742,6 +781,14 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
       allReadonly = false
     }
     const lits = c.args.map((a) => a.text)
+
+    // Relative words resolve against the tracked cwd, so `cd /proc/self && cat environ` is caught too.
+    for (const a of c.args) {
+      const p = resolveWord(a, ctx, cwd)
+      if (p === null) continue
+      if (isProcSecret(p)) return deny(PROC_DENY)
+      if (isSensitiveRead(p, sensitive, ctx.caseInsensitive)) out.sensitive = true
+    }
 
     if (c.name === 'cd' || c.name === 'pushd' || c.name === 'popd') {
       const dirs = nonFlag(c.args)
@@ -944,5 +991,5 @@ export function classifyBash(cmd: string, ctx: GuardContext): BashClass {
   const a = analyze(cmd, ctx, 0, resolve(ctx.projectRoot))
   if (a.deny) return { kind: 'deny', reason: a.deny }
   if (a.readonly) return { kind: 'readonly', paths: a.readonlyPaths }
-  return { kind: 'other', unparsable: a.unparsable }
+  return { kind: 'other', unparsable: a.unparsable, ...(a.sensitive ? { sensitive: true } : {}) }
 }

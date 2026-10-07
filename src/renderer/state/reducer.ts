@@ -166,7 +166,8 @@ function onEvent(s: AppState, e: AgentEvent): AppState {
     }
     case 'approval-request': {
       const idx = findActivity(s.transcript, e.request.call.id)
-      const next = idx < 0 || !e.request.diff ? s : patchItem(s, idx, { diff: e.request.diff })
+      // The call is waiting for the user, so it is running, also when it came back from a reloaded history as "done".
+      const next = idx < 0 ? s : patchItem(s, idx, { state: 'running', ...(e.request.diff ? { diff: e.request.diff } : {}) })
       return { ...next, approval: e.request }
     }
     case 'tool-start':
@@ -174,7 +175,13 @@ function onEvent(s: AppState, e: AgentEvent): AppState {
     case 'question':
       return { ...s, question: { id: e.id, question: e.question, ...(e.options ? { options: e.options } : {}) } }
     case 'status':
-      return { ...s, status: { state: e.state, label: e.label } }
+      // A turn that started elsewhere (another window, Autopilot) still marks this one busy; turn-end frees it.
+      return { ...s, status: { state: e.state, label: e.label }, ...(e.state !== 'idle' ? { busy: true } : {}) }
+    case 'history-reload': {
+      // Like the history action, but the turn in progress goes on. The router re-sends what is pending right after.
+      const rebuilt = itemsFromHistory(e.history)
+      return { ...s, transcript: rebuilt.transcript, seq: rebuilt.seq, approval: null, question: null }
+    }
     case 'todos':
       return { ...s, todos: e.todos }
     case 'usage':

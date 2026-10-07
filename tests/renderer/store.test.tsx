@@ -133,4 +133,108 @@ describe('AppProvider', () => {
     })
     expect(r.arc.callsTo(IPC.answer)).toEqual([{ questionId: 'q1', answer: 'Blue' }])
   })
+
+  describe('a rejected send must not clear the real turn', () => {
+    const send = async (r: Awaited<ReturnType<typeof renderWithApp>>) => {
+      await act(async () => {
+        await r.app().actions.sendMessage('go')
+      })
+    }
+    const turnEnds = (r: Awaited<ReturnType<typeof renderWithApp>>) => r.state().transcript.length
+
+    it('a busy conflict explains itself and leaves the running turn (busy, spinner) alone', async () => {
+      const arc = createFakeArc({ [IPC.send]: { ok: false, error: 'A turn is already running. Stop it or wait for it to finish.', code: 'busy' } })
+      const r = await renderWithApp(<div />, { arc })
+      await r.emit({ type: 'status', state: 'working', label: 'Editing a.ts' })
+      await send(r)
+      expect(r.state().busy).toBe(true)
+      expect(r.state().status).toEqual({ state: 'working', label: 'Editing a.ts' })
+      expect(r.state().transcript.at(-1)).toMatchObject({ kind: 'notice', level: 'error', message: expect.stringMatching(/already running/) })
+      expect(turnEnds(r)).toBeGreaterThan(0)
+    })
+
+    it.each(['no-api-key', 'no-project', 'invalid'] as const)('%s means the turn never started: the composer is freed', async (code) => {
+      const arc = createFakeArc({ [IPC.send]: { ok: false, error: 'nope', code } })
+      const r = await renderWithApp(<div />, { arc })
+      await send(r)
+      expect(r.state().busy).toBe(false)
+      expect(r.state().status.state).toBe('idle')
+    })
+
+    it('an error without a code frees the composer only when the backend is not running a turn', async () => {
+      const idle = await renderWithApp(<div />, { arc: createFakeArc({ [IPC.send]: { ok: false, error: 'Could not reach the cloud worker.' } }) })
+      await send(idle)
+      expect(idle.state().busy).toBe(false)
+
+      const running = createFakeArc({ [IPC.send]: { ok: false, error: 'Could not reach the cloud worker.' } })
+      const r = await renderWithApp(<div />, { arc: running })
+      running.respond(IPC.status, { ok: true, data: { ...readyStatus, busy: true } })
+      await send(r)
+      expect(r.state().busy).toBe(true)
+    })
+
+    it('ArcError carries the busy code', async () => {
+      const { createClient, ArcError } = await import('../../src/renderer/arc/client')
+      const client = createClient(createFakeArc({ [IPC.send]: { ok: false, error: 'busy', code: 'busy' } }))
+      const err = await client.send('x').catch((e) => e)
+      expect(err).toBeInstanceOf(ArcError)
+      expect(err.code).toBe('busy')
+    })
+  })
+
+  describe('opening a cloud session that is mid-turn', () => {
+    const history = [
+      { role: 'user' as const, parts: [{ text: 'Write a.txt' }] },
+      { role: 'model' as const, parts: [{ text: 'On it.' }, { functionCall: { name: 'Write', args: { file_path: 'a.txt' }, id: 'w1' } }] },
+    ]
+    const info = { id: 'c1', repo: 'me/app', branch: 'arc/x-1', baseBranch: 'main', busy: true, mode: 'ask', createdAt: 'a', lastActiveAt: 'b', pushed: false }
+    const approval = { call: { id: 'w1', name: 'Write', args: { file_path: 'a.txt' } }, reason: 'Write a.txt', diff: '+A' }
+
+    it('keeps the catch-up events the router emitted before the reply: they arrive before the history is applied', async () => {
+      const arc = createFakeArc()
+      const r = await renderWithApp(<div />, { arc })
+      arc.respond(IPC.cloudAttach, () => {
+        arc.emit({ type: 'text-delta', text: 'stale text of the session we are leaving' })
+        arc.emit({ type: 'history-reload', history })
+        arc.emit({ type: 'text-delta', text: 'Half a sent' })
+        arc.emit({ type: 'approval-request', request: approval })
+        arc.emit({ type: 'status', state: 'waiting-approval', label: 'Waiting for you' })
+        return { ok: true, data: { root: 'me/app @ arc/x-1', sessionId: 'c1', history, cloud: info } }
+      })
+      await act(async () => {
+        await r.app().actions.cloudAttach('c1')
+      })
+      const items = r.state().transcript
+      expect(items.map((i) => i.kind)).toEqual(['user', 'assistant', 'activity', 'assistant'])
+      expect(items.some((i) => i.kind === 'assistant' && i.text.includes('stale'))).toBe(false)
+      expect(items.at(-1)).toMatchObject({ kind: 'assistant', text: 'Half a sent', streaming: true })
+      expect(r.state().approval?.call.id).toBe('w1')
+      expect(r.state().status.state).toBe('waiting-approval')
+      expect(r.state().busy).toBe(true)
+    })
+
+    it('events after the open go straight through', async () => {
+      const arc = createFakeArc({ [IPC.cloudAttach]: { ok: true, data: { root: 'me/app @ arc/x-1', sessionId: 'c1', history, cloud: info } } })
+      const r = await renderWithApp(<div />, { arc })
+      await act(async () => {
+        await r.app().actions.cloudAttach('c1')
+      })
+      await r.emit({ type: 'text-delta', text: 'later' })
+      expect(r.state().transcript.at(-1)).toMatchObject({ kind: 'assistant', text: 'later' })
+    })
+
+    it('a failed open does not swallow events and leaves the view alone', async () => {
+      const arc = createFakeArc()
+      const r = await renderWithApp(<div />, { arc })
+      await r.emit({ type: 'text-delta', text: 'current view' })
+      arc.respond(IPC.cloudAttach, () => ({ ok: false, error: 'That cloud session no longer exists.' }))
+      await act(async () => {
+        await r.app().actions.cloudAttach('c1')
+      })
+      expect(r.state().transcript.map((i) => i.kind)).toEqual(['assistant', 'notice'])
+      await r.emit({ type: 'text-delta', text: ' goes on' })
+      expect(r.state().transcript.at(-1)).toMatchObject({ kind: 'assistant', text: ' goes on' })
+      expect(r.state().transcript[0]).toMatchObject({ text: 'current view' })
+    })
+  })
 })

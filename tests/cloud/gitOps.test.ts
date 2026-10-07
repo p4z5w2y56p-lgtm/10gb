@@ -253,7 +253,8 @@ describe('git child environment', () => {
       expect(c.env.GIT_CONFIG_GLOBAL).toBe('/dev/null')
       expect(c.env.GIT_CONFIG_NOSYSTEM).toBe('1')
       expect(c.env.GIT_TERMINAL_PROMPT).toBe('0')
-      expect(c.env.GIT_ASKPASS).toBe(join(work, 'askpass.sh'))
+      if (c.sub === 'clone' || c.sub === 'push') expect(c.env.GIT_ASKPASS?.startsWith(join(work, 'ask-'))).toBe(true)
+      else expect(c.env.GIT_ASKPASS).toBeUndefined()
       expect(c.env.LC_ALL).toBe('C')
       expect(c.env.GIT_OPTIONAL_LOCKS).toBe('0')
       if (c.sub === 'clone' || c.sub === 'push') expect(c.env.ARC_GIT_TOKEN, c.args).toBe(TOKEN)
@@ -292,22 +293,23 @@ describe('git child environment', () => {
     for (const c of calls) expect(c.args).not.toContain('protocol.file.allow')
   })
 
-  it('creates an empty HOME and a private askpass script that answers username and password prompts', async () => {
+  it('creates an empty HOME and no persistent askpass script', async () => {
     await started()
     expect(await readdir(join(work, 'home'))).toEqual([])
-    const st = await stat(join(work, 'askpass.sh'))
-    expect(st.mode & 0o777).toBe(0o700)
-    const ask = (prompt: string) =>
-      execFileSync(join(work, 'askpass.sh'), [prompt], { env: { PATH: cleanEnv.PATH, ARC_GIT_TOKEN: TOKEN }, encoding: 'utf8' }).trim()
-    expect(ask("Username for 'https://github.com': ")).toBe('x-access-token')
-    expect(ask("Password for 'https://x-access-token@github.com': ")).toBe(TOKEN)
+    expect(existsSync(join(work, 'askpass.sh'))).toBe(false)
   })
 
-  it('keeps an existing askpass script instead of rewriting it', async () => {
-    await mkdir(work, { recursive: true })
-    await writeFile(join(work, 'askpass.sh'), '#!/bin/sh\necho custom\n', { mode: 0o700 })
-    await started()
-    expect(await readFile(join(work, 'askpass.sh'), 'utf8')).toContain('custom')
+  it('writes a private per-call askpass script that answers username and password prompts, then deletes it', async () => {
+    const log = join(root, 'ask-answers')
+    const bin = join(root, 'git-ask')
+    await writeFile(
+      bin,
+      `#!/bin/sh\nif [ -n "$GIT_ASKPASS" ]; then { stat -c %a "$GIT_ASKPASS"; stat -c %a "$(dirname "$GIT_ASKPASS")"; "$GIT_ASKPASS" "Username for 'https://github.com': "; "$GIT_ASKPASS" "Password for 'https://x-access-token@github.com': "; } >> '${log}'; fi\nexec git "$@"\n`,
+      { mode: 0o755 },
+    )
+    await started(newOps({ gitBin: bin }))
+    expect((await readFile(log, 'utf8')).trim().split('\n')).toEqual(['500', '700', 'x-access-token', TOKEN])
+    expect((await readdir(work)).filter((n) => n.startsWith('ask-'))).toEqual([])
   })
 })
 
@@ -435,13 +437,13 @@ describe('commitAndPush', () => {
     expect(git(root, '--git-dir', remote, 'show', `${r.head}:feature.txt`)).toBe('feature')
   })
 
-  it('pushes again when there is nothing new to commit, reporting no commit', async () => {
+  it('sends nothing when there is nothing new to commit and the remote has the head', async () => {
     const { ops, branch } = await started()
     await writeFile(join(session, 'a.txt'), 'a\n')
     const first = await push(ops, branch)
     const second = await push(ops, branch)
     expect(second.commit).toBeNull()
-    expect(second.pushed).toBe(true)
+    expect(second.pushed).toBe(false)
     expect(second.head).toBe(first.head)
     expect(remoteRef(`refs/heads/${branch}`)).toBe(first.head)
   })
@@ -588,18 +590,18 @@ describe('commitAndPush', () => {
 
     for (const c of (await rec.calls()).filter((x) => x.sub === 'push')) {
       expect(c.args).not.toMatch(/--force|\s-f\b|\+HEAD|--mirror|--delete|:refs\/heads\/main/)
-      expect(c.args).toContain(`HEAD:refs/heads/${branch}`)
+      expect(c.args).toContain(`refs/heads/arc-push:refs/heads/${branch}`)
     }
   })
 
-  it('pushes only HEAD:refs/heads/<branch> to the explicit url', async () => {
+  it('pushes only <pristine ref>:refs/heads/<branch> to the explicit url', async () => {
     const rec = await recordingGit()
     const { ops, branch } = await started(newOps({ gitBin: rec.bin }))
     await writeFile(join(session, 'x.txt'), 'x\n')
     await push(ops, branch)
     const pushes = (await rec.calls()).filter((c) => c.sub === 'push')
     expect(pushes).toHaveLength(1)
-    expect(pushes[0].args).toMatch(new RegExp(`push --no-verify --no-recurse-submodules -- ${remoteUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} HEAD:refs/heads/${branch}$`))
+    expect(pushes[0].args).toMatch(new RegExp(`push --porcelain --no-verify --no-recurse-submodules -- ${remoteUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} refs/heads/arc-push:refs/heads/${branch}$`))
   })
 
   it.each([

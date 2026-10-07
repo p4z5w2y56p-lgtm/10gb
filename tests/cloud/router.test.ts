@@ -34,6 +34,9 @@ interface WSession {
   seq: number
   log: Array<{ seq: number; event: AgentEvent }>
   streams: Set<ServerResponse>
+  /** What /history reports besides the transcript. */
+  pending: { approval?: unknown; question?: { id: string; question: string; options?: string[] } }
+  inflight?: { text: string }
 }
 
 const DIFF = (info: CloudSessionInfo): CloudDiff => ({ branch: info.branch, baseBranch: info.baseBranch, files: [], uncommitted: false, ahead: 1, pushed: info.pushed })
@@ -50,6 +53,8 @@ class FakeWorker {
   eventsStatus: number | null = null
   /** The next events connection that is behind this gets a gap message (once). */
   gapOldest: number | null = null
+  /** The history route answers with this status (and no history) while set. */
+  historyStatus: number | null = null
   private server = createServer((req, res) => void this.handle(req, res))
   private sockets = new Set<Socket>()
 
@@ -86,6 +91,7 @@ class FakeWorker {
       seq,
       log: [],
       streams: new Set(),
+      pending: {},
     }
     this.sessions.set(id, s)
     return s
@@ -154,7 +160,10 @@ class FakeWorker {
       this.sessions.delete(s.info.id)
       return this.json(res, 200, { ok: true })
     }
-    if (sub === 'history') return this.json(res, 200, { history: s.history, seq: s.seq })
+    if (sub === 'history') {
+      if (this.historyStatus !== null) return this.json(res, this.historyStatus, { ok: false, error: 'history failed', code: 'forced' })
+      return this.json(res, 200, { history: s.history, seq: s.seq, pending: s.pending, ...(s.inflight ? { inflight: s.inflight } : {}) })
+    }
     if (sub === 'diff') return this.json(res, 200, DIFF(s.info))
     if (sub === 'push') {
       s.info.pushed = true
@@ -653,7 +662,7 @@ describe('BackendRouter.cloudStart', () => {
     h.worker.emit(cloud.id, { type: 'text-delta', text: 'hello' })
     h.worker.emit(cloud.id, { type: 'tool-start', id: 't1' })
     await until(() => h.emitted.some((e) => e.type === 'tool-start'), 'forwarded events')
-    expect(h.emitted.filter((e) => e.type !== 'mode')).toEqual([
+    expect(h.emitted.filter((e) => !['mode', 'history-reload', 'status'].includes(e.type))).toEqual([
       { type: 'text-delta', text: 'hello' },
       { type: 'tool-start', id: 't1' },
     ])
@@ -831,11 +840,11 @@ describe('BackendRouter while attached to a cloud session', () => {
     expect(h.worker.invokes('sessions:list')).toHaveLength(1)
   })
 
-  it('detaches before opening a local project, then calls the local backend', async () => {
+  it('calls the local backend, and leaves the cloud session once that has opened the project', async () => {
     const h = await setup()
     const s = await attached(h)
     h.local.openProject.mockImplementationOnce(async (path: string) => {
-      expect((await h.router.status()).cloud ?? null).toBeNull()
+      expect((await h.router.status()).cloud?.id).toBe(s.info.id)
       return { root: path, sessionId: 'local-1', history: [] }
     })
     await h.router.openProject('/work')
@@ -882,7 +891,7 @@ describe('BackendRouter settings and keys while attached', () => {
     expect(h.worker.invokes('settings:save')).toHaveLength(1)
     expect(h.worker.invokes('settings:save')[0].body).toEqual({
       channel: 'settings:save',
-      payload: { patch: { model: 'm-2', prompter: { mode: 'off' } } },
+      payload: { patch: { model: 'm-2', prompter: { mode: 'off' }, cloud: { autoPush: false } } },
     })
     expect(out.settings.model).toBe('m-2')
     expect(out.status.cloud).toBeTruthy()
@@ -1250,5 +1259,321 @@ describe('BackendRouter.dispose', () => {
     expect(h.worker.invokes('agent:stop')).toHaveLength(0)
     expect(h.worker.hits('DELETE', /./)).toHaveLength(0)
     expect(h.worker.sessions.has(s.info.id)).toBe(true)
+  })
+})
+
+// ------------------------------------------------------------------ review fixes
+
+const APPROVAL = { call: { id: 'w1', name: 'Write', args: { file_path: 'a.txt' } }, reason: 'Write a.txt', diff: '+A' }
+const types = (events: AgentEvent[]) => events.map((e) => e.type)
+const reset = (h: Harness) => h.emitted.splice(0)
+
+describe('attach shows exactly what a connected client would', () => {
+  it('rebuilds the transcript, then the in-flight text, the pending approval and question, and a busy status', async () => {
+    const h = await setup()
+    const s = h.worker.seed({ busy: true }, 7)
+    s.pending = { approval: APPROVAL, question: { id: 'q1', question: 'Which?', options: ['a', 'b'] } }
+    s.inflight = { text: 'Half a sent' }
+    const opened = await h.router.cloudAttach(s.info.id)
+    expect(opened.history).toEqual(s.history)
+    expect(types(h.emitted)).toEqual(['history-reload', 'mode', 'text-delta', 'approval-request', 'question', 'status'])
+    expect(h.emitted[0]).toEqual({ type: 'history-reload', history: s.history })
+    expect(h.emitted[2]).toEqual({ type: 'text-delta', text: 'Half a sent' })
+    expect(h.emitted[3]).toEqual({ type: 'approval-request', request: APPROVAL })
+    expect(h.emitted[4]).toEqual({ type: 'question', id: 'q1', question: 'Which?', options: ['a', 'b'] })
+    expect(h.emitted[5]).toMatchObject({ type: 'status', state: 'waiting-approval' })
+  })
+
+  it('a busy session without anything pending shows a working status, an idle one shows idle and no turn-end', async () => {
+    const h = await setup()
+    const busy = h.worker.seed({ busy: true })
+    await h.router.cloudAttach(busy.info.id)
+    expect(h.emitted.at(-1)).toMatchObject({ type: 'status' })
+    expect((h.emitted.at(-1) as { state: string }).state).not.toBe('idle')
+    const h2 = await setup()
+    const idle = h2.worker.seed({ busy: false })
+    await h2.router.cloudAttach(idle.info.id)
+    expect(h2.emitted.at(-1)).toMatchObject({ type: 'status', state: 'idle' })
+    expect(types(h2.emitted)).not.toContain('turn-end')
+  })
+
+  it('starts the stream after the catch-up events, from the history seq', async () => {
+    const h = await setup()
+    const s = h.worker.seed({ busy: true }, 5)
+    s.inflight = { text: 'abc' }
+    await h.router.cloudAttach(s.info.id)
+    await until(() => h.worker.streamCount(s.info.id) === 1, 'stream')
+    h.worker.emit(s.info.id, { type: 'text-delta', text: 'def' })
+    await until(() => h.emitted.filter((e) => e.type === 'text-delta').length === 2, 'live delta')
+    expect(h.emitted.filter((e) => e.type === 'text-delta').map((e) => (e as { text: string }).text)).toEqual(['abc', 'def'])
+  })
+
+  it('an older worker (no pending or in-flight in /history) attaches fine', async () => {
+    const h = await setup()
+    const s = h.worker.seed({})
+    delete (s as { inflight?: unknown }).inflight
+    await expect(h.router.cloudAttach(s.info.id)).resolves.toBeDefined()
+  })
+})
+
+describe('a gap makes the renderer consistent', () => {
+  async function gap(h: Harness, s: ReturnType<FakeWorker['seed']>) {
+    reset(h)
+    h.worker.gapOldest = 50
+    s.seq = 60
+    h.worker.dropStreams(s.info.id)
+    await until(() => h.notices().some((n) => n.message === 'Caught up with the cloud session.'), 'catch-up notice')
+  }
+
+  it('emits history-reload plus pending and in-flight, and no turn-end while the worker is busy', async () => {
+    const h = await setup()
+    const s = await attached(h, { busy: true })
+    s.pending = { approval: APPROVAL }
+    s.inflight = { text: 'partial' }
+    await gap(h, s)
+    expect(types(h.emitted.filter((e) => e.type !== 'notice'))).toEqual(['history-reload', 'mode', 'text-delta', 'approval-request', 'status'])
+    expect(types(h.emitted)).not.toContain('turn-end')
+    await until(() => h.worker.streamCount(s.info.id) === 1, 'stream again')
+  })
+
+  it('emits a turn-end when the worker says it is not busy (the real one fell into the gap)', async () => {
+    const h = await setup()
+    const s = await attached(h, { busy: false })
+    await h.router.send('go') // the router believes a turn runs
+    s.info.busy = false
+    await gap(h, s)
+    expect(h.emitted.filter((e) => e.type === 'turn-end')).toHaveLength(1)
+    expect(types(h.emitted.filter((e) => e.type !== 'notice'))[0]).toBe('history-reload')
+    expect((await h.router.status()).busy).toBe(false)
+  })
+
+  it('a token refused while reloading detaches with a turn-end and the settings hint', async () => {
+    const h = await setup()
+    const s = await attached(h, { busy: true })
+    reset(h)
+    h.worker.gapOldest = 50
+    s.seq = 60
+    h.worker.historyStatus = 401
+    h.worker.dropStreams(s.info.id)
+    await until(() => h.notices().some((n) => /Settings > Cloud/.test(n.message)), 'unauthorized notice')
+    expect(h.emitted).toContainEqual({ type: 'turn-end', reason: 'error' })
+    expect(h.emitted).toContainEqual({ type: 'status', state: 'idle', label: 'Idle' })
+    expect((await h.router.status()).cloud ?? null).toBeNull()
+  })
+
+  it('any other reload failure also detaches with a turn-end, so the spinner cannot stay', async () => {
+    const h = await setup()
+    const s = await attached(h, { busy: true })
+    reset(h)
+    h.worker.gapOldest = 50
+    s.seq = 60
+    h.worker.historyStatus = 500
+    h.worker.dropStreams(s.info.id)
+    await until(() => h.notices().some((n) => /Could not catch up/.test(n.message)), 'catch-up failure notice')
+    expect(h.emitted).toContainEqual({ type: 'turn-end', reason: 'error' })
+    expect(h.emitted).toContainEqual({ type: 'status', state: 'idle', label: 'Idle' })
+    expect((await h.router.status()).cloud ?? null).toBeNull()
+  })
+})
+
+describe('detaching always frees the spinner', () => {
+  const freed = (h: Harness) => {
+    expect(h.emitted).toContainEqual({ type: 'turn-end', reason: 'error' })
+    expect(h.emitted).toContainEqual({ type: 'status', state: 'idle', label: 'Idle' })
+  }
+
+  it('on an unauthorized stream', async () => {
+    const h = await setup()
+    const s = await attached(h, { busy: true })
+    reset(h)
+    h.worker.eventsStatus = 401
+    h.worker.dropStreams(s.info.id)
+    await until(() => h.notices().some((n) => n.level === 'error'), 'error notice')
+    freed(h)
+  })
+
+  it('on cloudLeave, cloudEnd and removing the access token', async () => {
+    const h = await setup()
+    await attached(h, { busy: true })
+    reset(h)
+    await h.router.cloudLeave()
+    freed(h)
+
+    const s2 = await attached(h, { busy: true })
+    reset(h)
+    await h.router.cloudEnd(s2.info.id)
+    freed(h)
+
+    await attached(h, { busy: true })
+    reset(h)
+    await h.router.cloudClearSecret('cloud-token')
+    freed(h)
+  })
+
+  it('when the session is gone exactly one turn-end is emitted', async () => {
+    const h = await setup()
+    const s = await attached(h, { busy: true })
+    reset(h)
+    h.worker.eventsStatus = 404
+    h.worker.dropStreams(s.info.id)
+    await until(() => h.emitted.some((e) => e.type === 'turn-end'), 'turn-end')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(h.emitted.filter((e) => e.type === 'turn-end')).toHaveLength(1)
+  })
+})
+
+describe('local operations while attached', () => {
+  it('openProject and resumeSession run the local operation first and only then leave the cloud session', async () => {
+    const h = await setup()
+    const s = await attached(h)
+    let attachedDuringOpen: boolean | undefined
+    h.local.openProject.mockImplementationOnce(async (path: string) => {
+      attachedDuringOpen = (await h.router.status()).cloud?.id === s.info.id
+      return { root: path, sessionId: 'local-1', history: [] }
+    })
+    await h.router.openProject('/work')
+    expect(attachedDuringOpen).toBe(true)
+    expect((await h.router.status()).cloud ?? null).toBeNull()
+    await until(() => h.worker.streamCount(s.info.id) === 0, 'stream closed')
+
+    await attached(h)
+    await h.router.resumeSession('s-1')
+    expect((await h.router.status()).cloud ?? null).toBeNull()
+  })
+
+  it('a failing local open keeps the cloud attachment and its stream', async () => {
+    const h = await setup()
+    const s = await attached(h)
+    reset(h)
+    h.local.openProject.mockRejectedValueOnce(new Error('No such folder'))
+    await expect(h.router.openProject('/nope')).rejects.toThrow('No such folder')
+    h.local.resumeSession.mockRejectedValueOnce(new Error('No such session'))
+    await expect(h.router.resumeSession('x')).rejects.toThrow('No such session')
+    expect((await h.router.status()).cloud?.id).toBe(s.info.id)
+    expect(h.worker.streamCount(s.info.id)).toBe(1)
+    expect(types(h.emitted)).not.toContain('turn-end')
+    h.worker.emit(s.info.id, { type: 'text-delta', text: 'still live' })
+    await until(() => h.emitted.some((e) => e.type === 'text-delta'), 'live event')
+  })
+
+  it('a failing cloudAttach (history cannot load) keeps the current attachment', async () => {
+    const h = await setup()
+    const a = await attached(h)
+    const b = h.worker.seed()
+    h.worker.historyStatus = 500
+    await expect(h.router.cloudAttach(b.info.id)).rejects.toThrow()
+    expect((await h.router.status()).cloud?.id).toBe(a.info.id)
+    expect(h.worker.streamCount(a.info.id)).toBe(1)
+  })
+})
+
+describe('a rejected send', () => {
+  it('a busy conflict throws an error with the code busy and marks the session busy', async () => {
+    const h = await setup()
+    await attached(h)
+    h.worker.invokeFail.set('agent:send', { error: 'A turn is already running. Stop it or wait for it to finish.', code: 'busy' })
+    const err = await h.router.send('x').catch((e) => e)
+    expect(err).toMatchObject({ code: 'busy' })
+    expect(err.message).toMatch(/already running/)
+    expect((await h.router.status()).busy).toBe(true)
+    expect(types(h.emitted)).not.toContain('turn-end')
+  })
+})
+
+describe('cloud.autoPush reaches the running session', () => {
+  it('forwards only cloud.autoPush, never the worker URL', async () => {
+    const h = await setup()
+    await attached(h)
+    await h.router.saveSettings({ cloud: { workerUrl: 'https://elsewhere.example', autoPush: false } })
+    const calls = h.worker.invokes('settings:save')
+    expect(calls).toHaveLength(1)
+    expect((calls[0].body as { payload: unknown }).payload).toEqual({ patch: { cloud: { autoPush: false } } })
+    expect(calls[0].raw).not.toContain('elsewhere.example')
+  })
+
+  it('does not call the worker for a worker URL change alone, and leaves other fields as before', async () => {
+    const h = await setup()
+    await attached(h)
+    await h.router.saveSettings({ cloud: { workerUrl: 'https://elsewhere.example' } })
+    expect(h.worker.invokes('settings:save')).toHaveLength(0)
+    await h.router.saveSettings({ maxSteps: 9, theme: 'studios', cloud: { autoPush: true } })
+    expect((h.worker.invokes('settings:save')[0].body as { payload: unknown }).payload).toEqual({ patch: { maxSteps: 9, cloud: { autoPush: true } } })
+  })
+})
+
+describe('removing the Vertex key while attached', () => {
+  it('stops the cloud turn and tells the worker to drop the key', async () => {
+    const h = await setup()
+    await attached(h, { busy: true })
+    await h.router.clearApiKey()
+    expect(h.worker.invokes('agent:stop')).toHaveLength(1)
+    const puts = h.worker.hits('PUT', /\/secrets$/)
+    expect(puts).toHaveLength(1)
+    expect(puts[0].body).toEqual({ clearApiKey: true })
+  })
+
+  it('warns, without throwing, when the worker could not be told', async () => {
+    const h = await setup()
+    const s = await attached(h)
+    h.worker.sessions.delete(s.info.id)
+    await expect(h.router.clearApiKey()).resolves.toBeDefined()
+  })
+})
+
+describe('the cached session stays fresh', () => {
+  it('pushed becomes true after the "Saved to GitHub" notice', async () => {
+    const h = await setup()
+    const s = await attached(h)
+    expect((await h.router.status()).cloud?.pushed).toBe(false)
+    s.info.pushed = true
+    h.worker.emit(s.info.id, { type: 'notice', level: 'info', message: 'Saved to GitHub: arc/x (abc1234)' })
+    await untilAsync(async () => (await h.router.status()).cloud?.pushed === true, 'pushed to refresh')
+  })
+
+  it('busy follows Autopilot events', async () => {
+    const h = await setup()
+    const s = await attached(h)
+    s.info.busy = true
+    h.worker.emit(s.info.id, { type: 'autopilot', running: true })
+    await untilAsync(async () => (await h.router.status()).busy === true, 'busy to refresh')
+    s.info.busy = false
+    h.worker.emit(s.info.id, { type: 'autopilot', running: false })
+    await untilAsync(async () => (await h.router.status()).busy === false, 'busy to clear')
+  })
+
+  it('a burst of notices does not turn into a burst of requests', async () => {
+    const h = await setup()
+    const s = await attached(h)
+    const before = h.worker.hits('GET', new RegExp(`^/v1/sessions/${s.info.id}$`)).length
+    for (let i = 0; i < 20; i++) h.worker.emit(s.info.id, { type: 'notice', level: 'info', message: `n${i}` })
+    await until(() => h.emitted.filter((e) => e.type === 'notice').length === 20, 'notices')
+    await new Promise((r) => setTimeout(r, 80))
+    expect(h.worker.hits('GET', new RegExp(`^/v1/sessions/${s.info.id}$`)).length - before).toBeLessThan(6)
+  })
+})
+
+describe('a failure after create does not orphan the session', () => {
+  it('deletes the worker session when the history cannot be loaded', async () => {
+    const h = await setup()
+    h.worker.historyStatus = 500
+    await expect(h.router.cloudStart(START)).rejects.toThrow()
+    expect(h.worker.hits('DELETE', /^\/v1\/sessions\/[^/]+$/)).toHaveLength(1)
+    expect(h.worker.sessions.size).toBe(0)
+    expect((await h.router.status()).cloud ?? null).toBeNull()
+  })
+
+  it('does not delete anything when create itself failed', async () => {
+    const h = await setup()
+    h.worker.createFail = { status: 409, error: 'Too many sessions (4 of 4).', code: 'too-many-sessions' }
+    await expect(h.router.cloudStart(START)).rejects.toThrow()
+    expect(h.worker.hits('DELETE', /./)).toHaveLength(0)
+  })
+
+  it('does not delete a session the user merely failed to attach to', async () => {
+    const h = await setup()
+    const s = h.worker.seed()
+    h.worker.historyStatus = 500
+    await expect(h.router.cloudAttach(s.info.id)).rejects.toThrow()
+    expect(h.worker.hits('DELETE', /./)).toHaveLength(0)
   })
 })

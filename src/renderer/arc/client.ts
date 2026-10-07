@@ -31,7 +31,7 @@ export interface Arc {
 export class ArcError extends Error {
   constructor(
     message: string,
-    readonly code?: 'no-api-key' | 'no-project' | 'invalid' | 'untrusted',
+    readonly code?: 'no-api-key' | 'no-project' | 'invalid' | 'untrusted' | 'busy',
   ) {
     super(message)
     this.name = 'ArcError'

@@ -216,7 +216,8 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     // Live events from the attach point on, and they match what the first client sees.
     await waitFor(() => turnEnds(d2) === 1 && savedNotices(d2).length === 1, 'turn-end and push seen by the second client')
     await waitFor(() => savedNotices(d1).length === 1, 'push seen by the first client')
-    const tail2 = d2.events.slice(1) // the router's own `mode` emit on attach
+    // Everything up to the router's catch-up `status` is the attach itself (history-reload, mode, status).
+    const tail2 = d2.events.slice(d2.events.findIndex((e) => e.type === 'status') + 1)
     expect(tail2.length).toBeGreaterThan(2)
     expect(json(d1.events.slice(-tail2.length))).toBe(json(tail2))
     expect(tail2.some((e) => e.type === 'tool-result' && e.id === 'b1')).toBe(true)
@@ -230,8 +231,8 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     expect(git(stack.barePath('octo', 'hello'), 'show', `${cloud.branch}:late.txt`)).toBe('late')
   })
 
-  // BUG: an approval that was requested before the second router attached is never shown to it (see bugsFound).
-  it.fails('a client that attaches while an approval is pending can still see and answer it', async () => {
+  // Fixed: /history carries the pending approval and the router replays it on attach.
+  it('a client that attaches while an approval is pending can still see and answer it', async () => {
     stack = await createStack({ script: [call('Write', { file_path: 'a.txt', content: 'A\n' }, 'w1'), text('done')] })
     const d1 = await stack.desktop({ mode: 'ask' })
     const { cloud } = await d1.router.cloudStart({ repo: 'octo/hello', name: 'pending' })
@@ -240,8 +241,45 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
 
     const d2 = await stack.desktop({ mode: 'ask' })
     await d2.router.cloudAttach(cloud.id)
-    await new Promise((r) => setTimeout(r, 400))
     expect(ofType(d2.events, 'approval-request')).toHaveLength(1)
+    expect(ofType(d2.events, 'approval-request')[0].request.call.id).toBe('w1')
+    expect(d2.events.map((e) => e.type).indexOf('history-reload')).toBeLessThan(d2.events.findIndex((e) => e.type === 'approval-request'))
+    expect(d2.events.at(-1)).toMatchObject({ type: 'status', state: 'waiting-approval' })
+    expect(await d2.router.status()).toMatchObject({ busy: true })
+
+    // The new window answers it and the turn (which would have hung) completes for both.
+    await d2.router.resolveApproval('w1', { decision: 'allow-once' })
+    await waitFor(() => turnEnds(d2) === 1 && turnEnds(d1) === 1, 'turn-end in both windows')
+    await waitFor(() => savedNotices(d1).length === 1, 'push')
+    expect(git(stack.barePath('octo', 'hello'), 'show', `${cloud.branch}:a.txt`)).toBe('A')
+  })
+
+  it('a client that attaches while a question is pending, or text is streaming, sees both', async () => {
+    stack = await createStack({
+      script: [
+        { chunks: [chunk([{ text: 'Let me ask. ' }, { functionCall: { name: 'AskUser', args: { question: 'Which colour?', options: ['red', 'blue'] }, id: 'q1' } }], {}, 'STOP')] },
+        { chunks: [chunk([{ text: 'Half a sent' }], {})], holdMs: Infinity },
+      ],
+    })
+    const d1 = await stack.desktop()
+    const { cloud } = await d1.router.cloudStart({ repo: 'octo/hello', name: 'q' })
+    await d1.router.send('ask me')
+    await waitFor(() => ofType(d1.events, 'question').length === 1, 'question')
+    const question = ofType(d1.events, 'question')[0]
+
+    const d2 = await stack.desktop()
+    await d2.router.cloudAttach(cloud.id)
+    expect(ofType(d2.events, 'question')).toEqual([question])
+    expect(ofType(d2.events, 'history-reload')[0].history.some((c) => c.parts.some((p) => p.text === 'Let me ask. '))).toBe(true)
+
+    await d2.router.resolveAnswer(question.id, 'blue')
+    await waitFor(() => ofType(d1.events, 'text-delta').some((e) => e.text === 'Half a sent'), 'streaming text')
+    const d3 = await stack.desktop()
+    await d3.router.cloudAttach(cloud.id)
+    expect(ofType(d3.events, 'text-delta').map((e) => e.text).join('')).toBe('Half a sent')
+    expect(ofType(d3.events, 'question')).toHaveLength(0)
+    await d3.router.stop()
+    await waitFor(() => turnEnds(d3) >= 1, 'stopped')
   })
 
   // ------------------------------------------------------------------ 4
@@ -310,9 +348,8 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     expect(json(rendered)).toBe(json(JSON.parse(json(reference))))
   })
 
-  // BUG: when the outage outlasts the replay buffer the client gets a gap; the router reloads the history only to
-  // find the sequence number and throws the transcript away, so the renderer never learns that the turn ended.
-  it.fails('after a replay gap the renderer still learns that the turn ended', async () => {
+  // Fixed: after a gap the router emits history-reload and derives the turn end from the worker's session info.
+  it('after a replay gap the renderer still learns that the turn ended', async () => {
     stack = await createStack({
       eventLog: { maxEvents: 4 },
       script: [call('Bash', { command: 'sleep 1.2; echo x > x.txt' }, 'b1'), text('long after')],
@@ -328,6 +365,11 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     await waitFor(() => noticeTexts(d.events).includes('Caught up with the cloud session.'), 'gap handled')
     await new Promise((r) => setTimeout(r, 500))
     expect(turnEnds(d)).toBe(1)
+    const reloads = ofType(d.events, 'history-reload')
+    expect(reloads.length).toBeGreaterThan(0)
+    // The reloaded transcript already holds the finished turn (the tool call and the final text).
+    expect(JSON.stringify(reloads.at(-1)!.history)).toContain('long after')
+    expect((await d.router.status()).busy).toBe(false)
   })
 
   // ------------------------------------------------------------------ 5
@@ -494,9 +536,10 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     await runTurn(d, 'write u')
     const changes = await d.router.getChanges()
     expect(changes.canUndo).toBe(true)
-    expect(changes.files).toEqual([join(repoDir(stack, cloud.id), 'u.txt')])
+    // Paths are relative to the repository root, not the worker's data dir.
+    expect(changes.files).toEqual(['u.txt'])
     const undone = await d.router.undo()
-    expect(undone.removed).toEqual([join(repoDir(stack, cloud.id), 'u.txt')])
+    expect(undone.removed).toEqual(['u.txt'])
     await expect(stat(join(repoDir(stack, cloud.id), 'u.txt'))).rejects.toThrow()
     await d.router.setMode('auto-edit')
     await waitFor(() => ofType(d.events, 'mode').at(-1)?.mode === 'auto-edit', 'mode event')
@@ -510,9 +553,36 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     expect(await d.router.listRules()).toEqual([])
   })
 
-  // BUG: info.pushed in the router is only refreshed at turn-end (before the auto-push has run), so the chip keeps
-  // saying "not pushed" after the "Saved to GitHub" notice until something else refreshes it.
-  it.fails('the attached session shows as pushed once the auto-push notice arrives', async () => {
+  it('turning auto-push off in Settings while attached reaches the running worker session, and on again', async () => {
+    stack = await createStack({
+      script: [call('Write', { file_path: 'one.txt', content: '1\n' }, 'w1'), text('one'), call('Write', { file_path: 'two.txt', content: '2\n' }, 'w2'), text('two')],
+    })
+    const d = await stack.desktop()
+    const { cloud } = await d.router.cloudStart({ repo: 'octo/hello', name: 'switch' })
+    await d.router.saveSettings({ cloud: { autoPush: false } })
+    await runTurn(d, 'one')
+    await new Promise((r) => setTimeout(r, 400))
+    expect(savedNotices(d)).toHaveLength(0)
+    expect(branches(stack)).not.toContain(cloud.branch)
+    await d.router.saveSettings({ cloud: { autoPush: true } })
+    await runTurn(d, 'two')
+    await autoPushOutcome(d)
+    expect(git(stack.barePath('octo', 'hello'), 'show', `${cloud.branch}:one.txt`)).toBe('1')
+  })
+
+  it('clearing the Vertex key while attached stops the cloud turn and the worker forgets the key', async () => {
+    stack = await createStack({ script: [{ chunks: [], holdMs: Infinity }] })
+    const d = await stack.desktop()
+    const { cloud } = await d.router.cloudStart({ repo: 'octo/hello', name: 'nokey' })
+    await d.router.send('long')
+    await waitFor(() => stack!.worker.get(cloud.id).busy, 'busy')
+    await d.router.clearApiKey()
+    await waitFor(() => turnEnds(d) >= 1, 'turn ended')
+    expect(await stack.worker.invoke(cloud.id, 'app:status', undefined)).toMatchObject({ ok: true, data: { hasApiKey: false } })
+  })
+
+  // Fixed: the router re-reads the session after notices, so the chip follows the auto-push.
+  it('the attached session shows as pushed once the auto-push notice arrives', async () => {
     stack = await createStack({ script: [call('Write', { file_path: 'p.txt', content: 'p\n' }, 'w1'), text('done')] })
     const d = await stack.desktop()
     await d.router.cloudStart({ repo: 'octo/hello', name: 'chip' })
@@ -535,7 +605,7 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
       stack = await createStack({
         env: ENV,
         script: [
-          call('Bash', { command: 'env; printenv; cat /proc/self/environ | tr "\\0" "\\n"; ls -la ..' }, 'b1'),
+          call('Bash', { command: 'env; printenv; ls -la ..' }, 'b1'),
           call('Write', { file_path: 'note.txt', content: 'harmless\n' }, 'w1'),
           call('Bash', { command: 'git remote -v; git config --local --list; cat .git/config' }, 'b2'),
           text('looked around'),
@@ -671,7 +741,14 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
     const { cloud } = await d.router.cloudStart({ repo: 'octo/hello', name: 'auto' })
     await d.router.send('Start something')
     await waitFor(() => ofType(d.events, 'autopilot').some((e) => !e.running), 'autopilot finished', 20_000)
-    await waitFor(() => git(stack!.barePath('octo', 'hello'), 'log', '--format=%s', `main..${cloud.branch}`).includes('arc: Write g.txt now'), 'autopilot commit pushed', 20_000)
+    // The branch only exists on the remote once the push has landed, so a missing ref just means "not yet".
+    await waitFor(() => {
+      try {
+        return git(stack!.barePath('octo', 'hello'), 'log', '--format=%s', `main..${cloud.branch}`).includes('arc: Write g.txt now')
+      } catch {
+        return false
+      }
+    }, 'autopilot commit pushed', 20_000)
     expect(git(stack.barePath('octo', 'hello'), 'show', `${cloud.branch}:g.txt`)).toBe('g')
   })
 
@@ -905,11 +982,8 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
       expect(await readFile(marker, 'utf8')).toContain('pre-commit')
     })
 
-    // HARDENING: the script git runs to get the token (data/git/askpass.sh) sits in the same data dir the agent's
-    // shell can write to in Auto mode, and CliGitOps writes it once (`wx`) and never checks or restores it. A
-    // replaced script receives ARC_GIT_TOKEN on the next https clone or push. (A local-path remote never calls
-    // askpass, so this test shows the replacement survives a push, not the theft itself.)
-    it.fails('the script that receives the token cannot be replaced by the agent', async () => {
+    // The token scripts are per-call temp files now; the worker's git work dir is also off limits to the agent's shell.
+    it('the agent cannot write into the worker git work dir, where the token scripts live', async () => {
       let askpass = ''
       stack = await createStack({
         script: ({ root }) => {
@@ -920,11 +994,9 @@ describe('ARC Cloud end to end (real router, client, server, worker, git; fake G
       const d = await stack.desktop()
       await d.router.cloudStart({ repo: 'octo/hello', name: 'askpass' })
       await runTurn(d, 'swap the askpass script')
-      expect(ofType(d.events, 'tool-result').find((e) => e.id === 'swap')?.result).toMatchObject({ ok: true })
-      await autoPushOutcome(d)
-      const after = await readFile(askpass, 'utf8')
-      expect(after).toContain('ARC_GIT_TOKEN')
-      expect(after).not.toContain('stolen')
+      const verdict = ofType(d.events, 'tool-call').find((e) => e.call.id === 'swap')?.verdict
+      expect(verdict?.verdict).toBe('deny')
+      await expect(readFile(askpass, 'utf8')).rejects.toThrow()
     })
   })
 })

@@ -62,8 +62,20 @@ export function sensitiveReadPaths(home: string, arcDataDir: string): string[] {
 
 const SENSITIVE_NAMES = [/^id_(rsa|dsa|ecdsa|ed25519)$/, /\.pem$/, /\.p12$/, /\.pfx$/, /^\.netrc$/, /^\.npmrc$/]
 
+/**
+ * A per-process directory of /proc (a pid, self, thread-self, or a glob that could be one) and everything under
+ * it: environ, mem, cmdline, maps, fd, root and cwd all expose another process's secrets or the whole filesystem.
+ * Plain system files such as /proc/cpuinfo are not covered.
+ */
+const PROC_PROCESS_DIR = /^\/proc\/(?:self|thread-self|\d+|[^/]*[*?[\]$][^/]*)(?:\/|$)/
+
+export function isProcSecret(absPath: string): boolean {
+  return PROC_PROCESS_DIR.test(resolve(absPath))
+}
+
 export function isSensitiveRead(absPath: string, sensitivePaths: string[], caseInsensitive = false): boolean {
   const p = resolve(absPath)
+  if (isProcSecret(p)) return true
   if (sensitivePaths.some((base) => under(p, resolve(base), caseInsensitive))) return true
   const name = basename(p)
   return SENSITIVE_NAMES.some((re) => re.test(name))

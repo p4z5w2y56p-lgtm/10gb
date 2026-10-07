@@ -1,6 +1,8 @@
 import { z } from 'zod'
 import type { CloudDiff, CloudSessionInfo, PullRequestResult, PushResult } from '../../shared/cloud'
+import type { ApprovalRequest } from '../../shared/types'
 import { SettingsSchema } from '../store/settings'
+import type { Content } from '../vertex/types'
 
 /**
  * The worker's HTTP API (all JSON, all under /v1, all but /health need `Authorization: Bearer <token>`).
@@ -12,7 +14,7 @@ import { SettingsSchema } from '../store/settings'
  *   DELETE /v1/sessions/:id                 -> { ok: true }                          (stops, deletes the workspace)
  *   POST   /v1/sessions/:id/invoke          -> IpcResult                             (body: InvokeBody; session channels only)
  *   PUT    /v1/sessions/:id/secrets         -> { ok: true }                          (body: SecretsBody; replaces in-memory secrets)
- *   GET    /v1/sessions/:id/history         -> { history: Content[], seq: number }
+ *   GET    /v1/sessions/:id/history         -> HistoryResponse (history, seq and what a connected client would know)
  *   GET    /v1/sessions/:id/events?after=N  -> text/event-stream (see SSE below)
  *   GET    /v1/sessions/:id/diff            -> CloudDiff
  *   POST   /v1/sessions/:id/push            -> PushResult
@@ -53,8 +55,21 @@ export type InvokeBody = z.infer<typeof InvokeBody>
 const Secret = z.string().trim().min(1).max(4096)
 
 /** Secrets travel per session, over TLS, live only in worker memory and are never written to disk. */
-export const SecretsBody = z.object({ apiKey: Secret.optional(), githubToken: Secret.optional() }).strict()
+export const SecretsBody = z
+  .object({ apiKey: Secret.optional(), githubToken: Secret.optional(), clearApiKey: z.literal(true).optional() })
+  .strict()
+  .refine((b) => !(b.clearApiKey && b.apiKey), { message: 'Send either apiKey or clearApiKey, not both' })
 export type SecretsBody = z.infer<typeof SecretsBody>
+
+/** `GET /history`: the transcript and, computed at the same instant as `seq`, the state the event stream cannot replay. */
+export interface HistoryResponse {
+  history: Content[]
+  seq: number
+  /** An approval or question the agent is waiting on. */
+  pending: { approval?: ApprovalRequest; question?: { id: string; question: string; options?: string[] } }
+  /** Assistant text streamed since the last message that reached `history`. */
+  inflight?: { text: string }
+}
 
 export const CreateSessionBody = z
   .object({
@@ -90,7 +105,15 @@ export interface ApiError {
  */
 export interface GitOps {
   /** Clone `httpsUrl` into `dir`, check out `baseBranch` (default branch when omitted), create and switch to `branch`. */
-  clone(opts: { httpsUrl: string; dir: string; token: string; baseBranch?: string; branch: string }): Promise<{ baseBranch: string; head: string }>
+  clone(opts: {
+    httpsUrl: string
+    dir: string
+    token: string
+    baseBranch?: string
+    branch: string
+    /** Aborted when the client that asked for the session went away; stop cloning where possible. */
+    signal?: AbortSignal
+  }): Promise<{ baseBranch: string; head: string }>
   /** Changed files against the base branch, plus commit and push state. */
   diff(opts: { dir: string; baseBranch: string; branch: string; pushedHead: string | null }): Promise<CloudDiff>
   /**

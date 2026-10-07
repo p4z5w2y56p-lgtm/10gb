@@ -281,6 +281,34 @@ describe('CloudClient error mapping', () => {
     expect(err.message).toBe('Too many sessions (4 of 4).')
   })
 
+  it('gives a busy conflict (HTTP 409) the code busy, with or without the worker body', async () => {
+    const withBody = fetchMock(() => json({ ok: false, error: 'A turn is already running.', code: 'busy' }, 409))
+    expect(await rejection(client(withBody.fetch).invoke(ID, 'agent:send', { text: 'x' }))).toMatchObject({ code: 'busy', status: 409 })
+    const noBody = fetchMock(() => new Response('conflict', { status: 409 }))
+    expect(await rejection(client(noBody.fetch).invoke(ID, 'agent:send', { text: 'x' }))).toMatchObject({ code: 'busy', status: 409 })
+  })
+
+  it('history returns the pending prompts and the in-flight text, and defaults them for an older worker', async () => {
+    const approval = { call: { id: 'w1', name: 'Write', args: { file_path: 'a.txt' } }, reason: 'ask' }
+    const full = fetchMock(() => json({ history: [{ role: 'user', parts: [{ text: 'hi' }] }], seq: 9, pending: { approval, question: { id: 'q', question: 'Which?', options: ['a'] } }, inflight: { text: 'Hel' } }))
+    expect(await client(full.fetch).history(ID)).toEqual({
+      history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      seq: 9,
+      pending: { approval, question: { id: 'q', question: 'Which?', options: ['a'] } },
+      inflight: { text: 'Hel' },
+    })
+    const old = fetchMock(() => json({ history: [], seq: 3 }))
+    expect(await client(old.fetch).history(ID)).toEqual({ history: [], seq: 3, pending: {} })
+    const bad = fetchMock(() => json({ history: [], seq: 3, pending: { approval: 'nope' } }))
+    expect(await rejection(client(bad.fetch).history(ID))).toMatchObject({ code: 'bad-response' })
+  })
+
+  it('putSecrets can ask the worker to forget the API key', async () => {
+    const { fetch, calls } = fetchMock(() => json({ ok: true }))
+    await client(fetch).putSecrets(ID, { clearApiKey: true })
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ clearApiKey: true })
+  })
+
   it('redacts the token when the worker echoes it back in an error', async () => {
     const { fetch } = fetchMock(() => json({ ok: false, error: `bad credentials ${TOKEN}` }, 400))
     const err = await rejection(client(fetch).list())
