@@ -198,6 +198,18 @@ describe('retries and errors', () => {
   })
 })
 
+describe('Stop during backoff (review finding 7)', () => {
+  it('aborts promptly instead of waiting out the retry delay', async () => {
+    const { c } = await client([{ status: 429 }, ok()], { sleep: () => new Promise<void>(() => undefined) })
+    const ctl = new AbortController()
+    const started = Date.now()
+    setTimeout(() => ctl.abort(), 50)
+    const err = await c.streamGenerate(req({ signal: ctl.signal })).catch((e) => e)
+    expect(err.kind).toBe('aborted')
+    expect(Date.now() - started).toBeLessThan(1500)
+  })
+})
+
 describe('testConnection', () => {
   it('is ok on a 200', async () => {
     const { c } = await client([ok()])

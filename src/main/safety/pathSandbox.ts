@@ -18,7 +18,7 @@ export async function canonicalRoot(root: string): Promise<string> {
  * Realpath of `p`, or for a path that does not exist yet, the realpath of its
  * nearest existing ancestor with the missing remainder appended.
  */
-async function realpathOrAncestor(p: string): Promise<string> {
+export async function realpathOrAncestor(p: string): Promise<string> {
   const missing: string[] = []
   let current = p
   for (;;) {
@@ -52,6 +52,16 @@ export async function resolveInside(
   target: string,
   opts: ResolveOptions = {},
 ): Promise<ResolveResult> {
+  try {
+    return await resolveInsideUnchecked(root, target, opts)
+  } catch (err) {
+    // ELOOP, ENAMETOOLONG, EACCES and friends: refuse the path rather than crash the caller.
+    const code = (err as NodeJS.ErrnoException).code ?? 'error'
+    return { ok: false, reason: `Cannot resolve the path (${code}): ${target}` }
+  }
+}
+
+async function resolveInsideUnchecked(root: string, target: string, opts: ResolveOptions): Promise<ResolveResult> {
   const ci = opts.caseInsensitive ?? false
   const realRoot = await realpathOrAncestor(resolve(root))
   const abs = isAbsolute(target) ? resolve(target) : resolve(realRoot, target)

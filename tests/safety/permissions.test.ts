@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { commandPrefixForRule, decide, type DecisionContext } from '../../src/main/safety/permissions'
+import { commandPrefixForRule, decide, isRuleEligible, type DecisionContext } from '../../src/main/safety/permissions'
 import { protectedWritePaths, sensitiveReadPaths } from '../../src/main/safety/protected'
 import type { PermissionMode, ToolCall } from '../../src/shared/types'
 
@@ -194,6 +194,61 @@ describe('rules and credentials', () => {
     expect(v.verdict).toBe('ask')
     const outside = await decide(call('Read', { file_path: join(base, 'x.txt') }), withMode('ask', { rules }))
     expect(outside.verdict).toBe('allow')
+  })
+})
+
+describe('case-insensitive volumes (review finding 2)', () => {
+  it('denies case variants of .arc/ and protected paths when the volume is case-insensitive', async () => {
+    for (const p of ['.arc/settings.json', '.ARC/settings.json', '.Arc/settings.json']) {
+      const v = await decide(call('Write', { file_path: p, content: '{}' }), withMode('auto-edit', { caseInsensitive: true }))
+      expect(v.verdict, p).toBe('deny')
+    }
+    const ssh = await decide(call('Write', { file_path: join(home, '.SSH', 'config'), content: 'x' }), withMode('auto-edit', { caseInsensitive: true }))
+    expect(ssh.verdict).toBe('deny')
+  })
+
+  it('still treats them as different names on a case-sensitive volume', async () => {
+    const v = await decide(call('Write', { file_path: '.ARC/settings.json', content: '{}' }), withMode('auto-edit', { caseInsensitive: false }))
+    expect(v.verdict).toBe('allow')
+  })
+
+  it('denies a Bash redirect into a case variant of a protected path', async () => {
+    const v = await decide(call('Bash', { command: 'echo x > .ARC/settings.json' }), withMode('auto', { caseInsensitive: true }))
+    expect(v.verdict).toBe('deny')
+  })
+})
+
+describe('rule scope (review finding 5)', () => {
+  it('an interpreter prefix never matches, even if it is in the store', async () => {
+    const rules = [{ tool: 'Bash' as const, prefix: 'python3 -c' }]
+    const v = await decide(call('Bash', { command: 'python3 -c "print(1)"' }), withMode('ask', { rules }))
+    expect(v.verdict).toBe('ask')
+  })
+
+  it('a rule does not cover a redirect that writes elsewhere, but allows harmless stream redirects', async () => {
+    const rules = [{ tool: 'Bash' as const, prefix: 'npm test' }]
+    expect((await decide(call('Bash', { command: 'npm test > ../out.txt' }), withMode('ask', { rules }))).verdict).toBe('ask')
+    expect((await decide(call('Bash', { command: 'npm test 2>&1' }), withMode('ask', { rules }))).verdict).toBe('allow')
+    expect((await decide(call('Bash', { command: 'npm test > /dev/null 2>&1' }), withMode('ask', { rules }))).verdict).toBe('allow')
+  })
+
+  it('isRuleEligible refuses interpreters and wrappers', () => {
+    expect(isRuleEligible('npm test')).toBe(true)
+    expect(isRuleEligible('mkdir -p')).toBe(true)
+    for (const p of ['python3 -c', 'bash -c', 'node -e', 'env FOO', 'sudo ls', 'xargs rm', 'eval x', 'find .']) {
+      expect(isRuleEligible(p), p).toBe(false)
+    }
+  })
+})
+
+describe('readonly Bash and symlinks to credentials', () => {
+  it('asks when a project symlink points into ~/.ssh', async () => {
+    await mkdir(join(home, '.ssh'), { recursive: true })
+    await writeFile(join(home, '.ssh', 'config'), 'Host x')
+    await symlink(join(home, '.ssh'), join(root, 'link'))
+    const v = await decide(call('Bash', { command: 'cat link/config' }), ctx)
+    expect(v.verdict).toBe('ask')
+    expect(v.reason.toLowerCase()).toContain('credential')
   })
 })
 

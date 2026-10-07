@@ -25,6 +25,12 @@ describe('buildSandboxProfile', () => {
     }
   })
 
+  it('re-denies writes to .arc and .git/hooks after the allow, so the kernel enforces them', () => {
+    const deny = '(deny file-write* (subpath "/Users/matt/proj/.arc") (subpath "/Users/matt/proj/.git/hooks"))'
+    expect(profile).toContain(deny)
+    expect(profile.indexOf(deny)).toBeGreaterThan(profile.indexOf('(allow file-write*'))
+  })
+
   it('puts the deny before the allow so the allow wins', () => {
     expect(profile.indexOf('(deny file-write*)')).toBeLessThan(profile.indexOf('(allow file-write*'))
   })

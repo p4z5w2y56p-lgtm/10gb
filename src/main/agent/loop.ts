@@ -11,7 +11,7 @@ import type {
   ToolResult,
   TurnEndReason,
 } from '../../shared/types'
-import { commandPrefixForRule, decide, type DecisionContext } from '../safety/permissions'
+import { commandPrefixForRule, decide, isRuleEligible, type DecisionContext } from '../safety/permissions'
 import { redact } from '../safety/redact'
 import type { AuditLog } from '../store/audit'
 import type { CheckpointStore } from '../store/checkpoints'
@@ -219,9 +219,21 @@ export class AgentSession {
       for (const part of calls) {
         const fc = part.functionCall!
         const call: ToolCall = { id: fc.id ?? `call_${randomUUID().slice(0, 8)}`, name: fc.name, args: fc.args ?? {} }
-        const result = signal.aborted
-          ? { ok: false, output: STOPPED_OUTPUT }
-          : await this.runCall(call, tctx, signal)
+        let result: ToolResult
+        if (signal.aborted) {
+          result = { ok: false, output: STOPPED_OUTPUT }
+        } else {
+          try {
+            result = await this.runCall(call, tctx, signal)
+          } catch (err) {
+            // Whatever went wrong, the call must still be answered or the history is invalid for good.
+            result = {
+              ok: false,
+              output: `Internal error while running ${fc.name}: ${err instanceof Error ? err.message : String(err)}. Try a different approach.`,
+            }
+            this.notice('warn', `A ${fc.name} call failed unexpectedly. The model was told.`)
+          }
+        }
         responses.push({
           functionResponse: {
             name: fc.name,
@@ -326,6 +338,7 @@ export class AgentSession {
       settings: { bashTimeoutMs: BASH_DEFAULT_TIMEOUT_MS },
       home: this.o.home,
       protectedPaths: this.o.protectedPaths,
+      caseInsensitive: process.platform === 'darwin',
       arcEnv: [],
     }
   }
@@ -334,13 +347,18 @@ export class AgentSession {
     let rule: AllowRule
     if (call.name === 'Bash') {
       const prefix = commandPrefixForRule(String(call.args.command ?? ''))
-      if (!prefix) return
+      // `python3 -c` or `bash -c` would approve any inline program, so no standing rule for those.
+      if (!prefix || !isRuleEligible(prefix)) return
       rule = { tool: 'Bash', prefix }
     } else {
       rule = { tool: call.name as ToolName }
     }
-    await this.o.rules.add(rule)
-    this.ruleCache = await this.o.rules.load()
+    try {
+      await this.o.rules.add(rule)
+      this.ruleCache = await this.o.rules.load()
+    } catch {
+      this.notice('warn', 'Could not save the always-allow rule. This one was allowed once.')
+    }
   }
 
   private async push(content: Content): Promise<void> {

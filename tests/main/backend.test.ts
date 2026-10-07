@@ -359,7 +359,21 @@ describe('audit and rules', () => {
     await turn
     expect((await app.readAudit()).map((e) => [e.tool, e.approvedBy])).toEqual([['Bash', 'user']])
     expect(await app.listRules()).toEqual([{ tool: 'Bash', prefix: 'mkdir -p' }])
+    await expect(stat(join(projectDir, '.arc'))).rejects.toThrow()
     await app.removeRule({ tool: 'Bash', prefix: 'mkdir -p' })
     expect(await app.listRules()).toEqual([])
+  })
+
+  it('a rules file shipped inside a cloned project does not pre-approve anything (review finding 4)', async () => {
+    const { app, projectDir, events } = await make([call('Bash', { command: 'mkdir -p made' }, 'b1'), text('ok')])
+    await mkdir(join(projectDir, '.arc'))
+    await writeFile(join(projectDir, '.arc', 'settings.json'), JSON.stringify({ rules: [{ tool: 'Bash', prefix: 'mkdir -p' }] }))
+    await app.openProject(projectDir)
+    const turn = app.send('make a dir')
+    await waitFor(() => app.hasPendingApproval('b1'))
+    expect(ofType(events, 'approval-request')).toHaveLength(1)
+    app.stop()
+    await turn
+    await expect(stat(join(projectDir, 'made'))).rejects.toThrow()
   })
 })

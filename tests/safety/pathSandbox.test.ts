@@ -99,3 +99,16 @@ describe('canonicalRoot (review focus 1: symlinked project root)', () => {
     expect(r.ok).toBe(true)
   })
 })
+
+describe('never throws (review finding 1)', () => {
+  it('returns ok:false for an over-long path component', async () => {
+    const r = await resolveInside(root, 'a'.repeat(300))
+    expect(r.ok).toBe(false)
+  })
+
+  it('returns ok:false for a symlink loop', async () => {
+    await symlink('loop', join(root, 'loop'))
+    const r = await resolveInside(root, 'loop/x')
+    expect(r.ok).toBe(false)
+  })
+})

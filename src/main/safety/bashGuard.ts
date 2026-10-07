@@ -7,11 +7,14 @@ export interface GuardContext {
   protectedPaths: string[]
   /** Credential locations; defaults to the standard list under `home`. */
   sensitivePaths?: string[]
+  /** Compare paths case-insensitively (default APFS volumes). */
+  caseInsensitive?: boolean
 }
 
 export type BashClass =
   | { kind: 'deny'; reason: string }
-  | { kind: 'readonly' }
+  /** `paths` are the absolute paths the command reads, so callers can check symlinks. */
+  | { kind: 'readonly'; paths: string[] }
   | { kind: 'other'; unparsable: boolean }
 
 interface Word {
@@ -93,6 +96,8 @@ function parseInto(src: string, P: Parsed, parent: Segment | null, via: 'top' | 
     const w = S.word
     if (!w) return
     S.word = null
+    // Brace expansion ({a,b} or {1..3}) can build any path, including ~ and credentials.
+    if (/\{[^{}]*(?:,|\.\.)[^{}]*\}/.test(w.text)) w.dynamic = true
     if (S.pending) {
       const p = S.pending
       S.pending = null
@@ -413,6 +418,8 @@ const OPAQUE = new Set([
 ])
 const KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'do', 'while', 'until', '!', '{'])
 const UNPARSABLE_CMDS = new Set(['eval', 'source', '.'])
+/** Commands that can write wherever an argument points (downloads, archives, syncs). */
+const WRITERS = new Set(['curl', 'wget', 'tar', 'unzip', 'rsync', 'scp', 'ditto'])
 const MUTATORS = new Set([
   'mv',
   'chmod',
@@ -500,6 +507,10 @@ interface Cmd {
   args: Word[]
   dynamicCmd: boolean
   opaque: boolean
+  /** A leading VAR=value (PATH, LD_PRELOAD, GIT_PAGER...) can change what a command runs. */
+  hasAssign: boolean
+  /** Run through env, command, time, nohup... */
+  wrapped: boolean
 }
 
 const isAssign = (w: Word): boolean => !w.dynamic && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w.text)
@@ -507,9 +518,12 @@ const isAssign = (w: Word): boolean => !w.dynamic && /^[A-Za-z_][A-Za-z0-9_]*=/.
 function commandOf(seg: Segment): Cmd | null {
   const w = seg.words
   let i = 0
+  let hasAssign = false
+  let wrapped = false
   while (i < w.length) {
     const t = w[i]
     if (isAssign(t)) {
+      hasAssign = true
       i++
       continue
     }
@@ -519,6 +533,7 @@ function commandOf(seg: Segment): Cmd | null {
     }
     if (!t.dynamic && WRAPPERS.has(basename(t.text))) {
       const wrapper = basename(t.text)
+      wrapped = true
       i++
       while (i < w.length) {
         const o = w[i]
@@ -526,6 +541,7 @@ function commandOf(seg: Segment): Cmd | null {
           if (wrapper === 'env' && ['-u', '-C', '-S'].includes(o.text)) i++
           i++
         } else if (isAssign(o)) {
+          hasAssign = true
           i++
         } else break
       }
@@ -536,9 +552,9 @@ function commandOf(seg: Segment): Cmd | null {
   const cmd = w[i]
   if (!cmd) return null
   const args = w.slice(i + 1)
-  if (cmd.dynamic) return { name: '', args, dynamicCmd: true, opaque: false }
+  if (cmd.dynamic) return { name: '', args, dynamicCmd: true, opaque: false, hasAssign, wrapped }
   const name = basename(cmd.text)
-  return { name, args, dynamicCmd: false, opaque: OPAQUE.has(name) }
+  return { name, args, dynamicCmd: false, opaque: OPAQUE.has(name), hasAssign, wrapped }
 }
 
 function insideProject(p: string, ctx: GuardContext): boolean {
@@ -572,6 +588,7 @@ interface Analysis {
   deny: string | null
   unparsable: boolean
   readonly: boolean
+  readonlyPaths: string[]
 }
 
 function gitReadonly(args: Word[]): boolean {
@@ -584,25 +601,43 @@ function gitReadonly(args: Word[]): boolean {
   return GIT_READONLY.has(sub)
 }
 
-function isReadonlyCommand(c: Cmd, ctx: GuardContext, sensitive: string[], cwd: string | null): boolean {
-  if (c.args.some((a) => a.dynamic)) return false
+/**
+ * The absolute paths a read-only command reads, or null when the command is not
+ * read-only: it has env assignments or wrappers, an argument we cannot resolve,
+ * a flag that makes it write or run something, or it touches credentials.
+ */
+function readonlyPaths(c: Cmd, ctx: GuardContext, sensitive: string[], cwd: string | null): string[] | null {
+  if (c.hasAssign || c.wrapped) return null
+  if (c.args.some((a) => a.dynamic)) return null
   const lits = c.args.map((a) => a.text)
-  if (c.name === 'git') return gitReadonly(c.args)
-  if (VERSION_ONLY.has(c.name)) return lits.length === 1 && /^(-v|-V|--version)$/.test(lits[0])
-  if (c.name === 'go') return lits.length === 1 && lits[0] === 'version'
-  if (!READONLY.has(c.name)) return false
-  if (c.name === 'sort' && lits.some((a) => /^(--output|-[a-zA-Z]*o)/.test(a))) return false
-  if (c.name === 'date' && lits.some((a) => /^(-s|--set)/.test(a))) return false
-  if (c.name === 'rg' && lits.some((a) => a.startsWith('--pre'))) return false
+  if (c.name === 'git') {
+    if (!gitReadonly(c.args)) return null
+  } else if (VERSION_ONLY.has(c.name)) {
+    return lits.length === 1 && /^(-v|-V|--version)$/.test(lits[0]) ? [] : null
+  } else if (c.name === 'go') {
+    return lits.length === 1 && lits[0] === 'version' ? [] : null
+  } else {
+    if (!READONLY.has(c.name)) return null
+    if (c.name === 'sort' && lits.some((a) => /^(--output|--compress-program|-[a-zA-Z]*o)/.test(a))) return null
+    if (c.name === 'date' && lits.some((a) => /^(-s|--set)/.test(a))) return null
+    if (c.name === 'rg' && lits.some((a) => a.startsWith('--pre') || a.startsWith('--hostname-bin'))) return null
+    if (c.name === 'tree' && lits.some((a) => /^-[a-zA-Z]*o/.test(a) || a.startsWith('--output'))) return null
+    if (c.name === 'file' && lits.some((a) => a === '-C' || a === '--compile')) return null
+    if (c.name === 'uniq' && nonFlag(c.args).length > 1) return null // the second operand is an output file
+  }
+  const paths: string[] = []
   for (const a of nonFlag(c.args)) {
     const p = resolveWord(a, ctx, cwd)
-    if (p !== null && isSensitiveRead(p, sensitive)) return false
+    if (p === null) return null
+    if (isSensitiveRead(p, sensitive, ctx.caseInsensitive)) return null
+    paths.push(p)
   }
-  return true
+  return paths
 }
 
 function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string | null): Analysis {
-  const out: Analysis = { deny: null, unparsable: false, readonly: false }
+  const out: Analysis = { deny: null, unparsable: false, readonly: false, readonlyPaths: [] }
+  const reads: string[] = []
   if (depth > 3) {
     out.unparsable = true
     return out
@@ -627,7 +662,7 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
       out.unparsable = true
       return null
     }
-    return isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot) ? w.text : null
+    return isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive) ? w.text : null
   }
 
   for (const seg of P.segments) {
@@ -645,12 +680,14 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
         continue
       }
       if (r.kind === 'out') {
-        if (isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot)) {
+        if (isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive)) {
           return deny(`write to a protected path: ${r.target.text}`)
         }
         if (p !== '/dev/null') allReadonly = false
-      } else if (isSensitiveRead(p, sensitive)) {
+      } else if (isSensitiveRead(p, sensitive, ctx.caseInsensitive)) {
         allReadonly = false
+      } else {
+        reads.push(p)
       }
     }
 
@@ -751,7 +788,7 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
             if (recursive) out.unparsable = true
             continue
           }
-          if (isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot)) {
+          if (isProtectedWrite(p, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive)) {
             return deny(`delete of a protected path: ${t.text}`)
           }
           if (recursive && !insideProject(p, ctx)) {
@@ -840,13 +877,26 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
             const bad = writeDenied(t)
             if (bad) return deny(`write to a protected path: ${bad}`)
           }
+        } else if (WRITERS.has(c.name)) {
+          const candidates: Word[] = [...nonFlag(c.args)]
+          for (const a of c.args) {
+            const eq = !a.dynamic && a.text.startsWith('-') ? a.text.indexOf('=') : -1
+            if (eq > 0) candidates.push({ text: a.text.slice(eq + 1), dynamic: false, globAt: null })
+          }
+          for (const t of candidates) {
+            const bad = writeDenied(t)
+            if (bad) return deny(`${c.name} would write to a protected path: ${bad}`)
+          }
         }
     }
 
-    if (!isReadonlyCommand(c, ctx, sensitive, cwd)) allReadonly = false
+    const paths = readonlyPaths(c, ctx, sensitive, cwd)
+    if (paths === null) allReadonly = false
+    else reads.push(...paths)
   }
 
   out.readonly = allReadonly && !out.unparsable
+  out.readonlyPaths = reads
   return out
 }
 
@@ -857,6 +907,6 @@ function analyze(cmd: string, ctx: GuardContext, depth: number, startCwd: string
 export function classifyBash(cmd: string, ctx: GuardContext): BashClass {
   const a = analyze(cmd, ctx, 0, resolve(ctx.projectRoot))
   if (a.deny) return { kind: 'deny', reason: a.deny }
-  if (a.readonly) return { kind: 'readonly' }
+  if (a.readonly) return { kind: 'readonly', paths: a.readonlyPaths }
   return { kind: 'other', unparsable: a.unparsable }
 }

@@ -1,6 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { mkdir as mkdirp, symlink } from 'node:fs/promises'
 import { AgentSession } from '../../src/main/agent/loop'
 import { protectedWritePaths } from '../../src/main/safety/protected'
 import { AuditLog } from '../../src/main/store/audit'
@@ -31,6 +32,7 @@ interface Opts {
   history?: Content[]
   sandboxAvailable?: boolean
   askUser?: (q: { question: string; options?: string[] }) => Promise<string>
+  rules?: Pick<ProjectRules, 'load' | 'add' | 'remove'>
 }
 
 async function setup(script: ScriptTurn[], opts: Opts = {}) {
@@ -44,7 +46,7 @@ async function setup(script: ScriptTurn[], opts: Opts = {}) {
   const checkpoints = new CheckpointStore(join(base, 'ckpt'), 's1')
   const sessionStore = new SessionStore(join(base, 'sessions'))
   const handle = sessionStore.create(fx.root)
-  const rules = new ProjectRules(fx.root)
+  const rules = new ProjectRules(join(base, 'rules'), fx.root)
   const approvals: Array<{ tool: string; diff?: string; signal: AbortSignal }> = []
   const approver: Approver =
     opts.approver ??
@@ -67,7 +69,7 @@ async function setup(script: ScriptTurn[], opts: Opts = {}) {
     audit,
     checkpoints,
     sessions: handle,
-    rules,
+    rules: (opts.rules ?? rules) as ProjectRules,
     approver: wrapped,
     askUser: opts.askUser ?? (async () => 'user answer'),
     emit: (e) => events.push(e),
@@ -77,6 +79,16 @@ async function setup(script: ScriptTurn[], opts: Opts = {}) {
     history: opts.history,
   })
   return { agent, events, vertex, audit, checkpoints, sessionStore, handle, rules, approvals, root: fx.root, home }
+}
+
+function expectValidHistory(history: Content[]) {
+  history.forEach((c, i) => {
+    const calls = c.parts.filter((p) => p.functionCall)
+    if (calls.length === 0) return
+    const next = history[i + 1]
+    expect(next?.role, `message ${i} has unanswered calls`).toBe('user')
+    expect(next.parts.filter((p) => p.functionResponse)).toHaveLength(calls.length)
+  })
 }
 
 const statuses = (events: AgentEvent[]) =>
@@ -522,5 +534,59 @@ describe('narration', () => {
     const { agent, events } = await setup([callTurn([{ name: 'TodoWrite', args: { todos } }]), textTurn('ok')])
     await agent.sendMessage('go')
     expect(events.filter((e) => e.type === 'todos')).toEqual([{ type: 'todos', todos }])
+  })
+})
+
+describe('survives failures inside the loop (review finding 1)', () => {
+  it('a path that cannot be resolved is refused, and the session stays usable', async () => {
+    const { agent, events } = await setup([
+      callTurn([{ name: 'Read', args: { file_path: 'a'.repeat(300) }, id: 'c1' }]),
+      textTurn('first'),
+      textTurn('second'),
+    ])
+    expect(await agent.sendMessage('go')).toBe('done')
+    expect(await agent.sendMessage('again')).toBe('done')
+    expectValidHistory(agent.getHistory())
+    expect(events.some((e) => e.type === 'notice' && e.level === 'error')).toBe(false)
+  })
+
+  it('a symlink loop is refused, and the session stays usable', async () => {
+    const { agent, root } = await setup([
+      callTurn([{ name: 'Read', args: { file_path: 'loop/x' }, id: 'c1' }]),
+      textTurn('done'),
+    ])
+    await symlink('loop', join(root, 'loop'))
+    expect(await agent.sendMessage('go')).toBe('done')
+    expectValidHistory(agent.getHistory())
+  })
+
+  it('a failing rule save does not break the turn or the history', async () => {
+    const broken = { load: async () => [], add: async () => { throw new Error('disk full') }, remove: async () => undefined }
+    const { agent, events } = await setup(
+      [callTurn([{ name: 'Bash', args: { command: 'mkdir -p made' }, id: 'b1' }]), textTurn('ok')],
+      { approver: async () => ({ decision: 'always' }), rules: broken },
+    )
+    expect(await agent.sendMessage('go')).toBe('done')
+    expectValidHistory(agent.getHistory())
+    expect(events.some((e) => e.type === 'notice' && e.level === 'warn' && /rule/i.test(e.message))).toBe(true)
+  })
+
+  it('an unexpected error while running one call still answers it and carries on', async () => {
+    const { agent, vertex } = await setup([
+      callTurn([{ name: 'Edit', args: { file_path: 'a.txt', old_string: 'x', new_string: 'y' }, id: 'e1' }]),
+      textTurn('ok'),
+    ], { approver: async () => { throw new Error('approver exploded') } })
+    expect(await agent.sendMessage('go')).toBe('done')
+    expectValidHistory(agent.getHistory())
+    expect(vertex.requests).toHaveLength(2)
+  })
+
+  it('"always allow" is not saved for an interpreter prefix like python3 -c', async () => {
+    const { agent, rules } = await setup(
+      [callTurn([{ name: 'Bash', args: { command: 'python3 -c "print(1)"' } }]), textTurn('ok')],
+      { approver: async () => ({ decision: 'always' }) },
+    )
+    await agent.sendMessage('go')
+    expect(await rules.load()).toEqual([])
   })
 })

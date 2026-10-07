@@ -1,6 +1,6 @@
 import { mkdir, symlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { globTool, lsTool, makeGrepTool, readTool } from '../../src/main/tools/fsRead'
 import { makeFixture, type Fixture } from '../helpers/toolContext'
@@ -85,6 +85,19 @@ describe('Read', () => {
     const out = await readTool.run({ file_path: join(fx.base, 'secret.txt') }, fx.ctx)
     expect(out.ok).toBe(false)
     expect(out.output).toContain('outside')
+  })
+})
+
+describe('Read and special files (review finding 9)', () => {
+  it('refuses a FIFO instead of blocking forever', async () => {
+    execFileSync('mkfifo', [join(fx.root, 'pipe')])
+    const r = await Promise.race([
+      readTool.run({ file_path: 'pipe' }, fx.ctx),
+      new Promise<'hung'>((res) => setTimeout(() => res('hung'), 2000)),
+    ])
+    expect(r).not.toBe('hung')
+    expect((r as { ok: boolean; output: string }).ok).toBe(false)
+    expect((r as { output: string }).output).toContain('regular file')
   })
 })
 

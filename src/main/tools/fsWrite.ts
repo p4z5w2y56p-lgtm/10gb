@@ -21,10 +21,22 @@ async function writableTarget(
 ): Promise<{ ok: true; real: string; rel: string } | { ok: false; output: string }> {
   const r = await resolveInside(ctx.projectRoot, filePath, { extraDirs: ctx.extraDirs })
   if (!r.ok) return { ok: false, output: r.reason }
-  if (isProtectedWrite(r.real, ctx.protectedPaths, ctx.projectRoot)) {
+  if (isProtectedWrite(r.real, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive)) {
     return { ok: false, output: `Writing to a protected path is never allowed: ${filePath}` }
   }
   return { ok: true, real: r.real, rel: relative(ctx.projectRoot, r.real) || filePath }
+}
+
+/** Read a text file, but only if decoding and re-encoding gives back the same bytes. Edit must never corrupt Latin-1 or binary files. */
+async function readStrictUtf8(path: string): Promise<{ ok: true; text: string } | { ok: false; reason: 'missing' | 'not-utf8' }> {
+  let buf: Buffer
+  try {
+    buf = await readFile(path)
+  } catch {
+    return { ok: false, reason: 'missing' }
+  }
+  const text = buf.toString('utf8')
+  return Buffer.from(text, 'utf8').equals(buf) ? { ok: true, text } : { ok: false, reason: 'not-utf8' }
 }
 
 /** Pure CRLF files are edited in LF space and written back as CRLF; mixed files are left exactly alone. */
@@ -78,12 +90,15 @@ export const editTool: Tool<EditArgs> = {
     const target = await writableTarget(ctx, args.file_path)
     if (!target.ok) return fail(target.output)
 
-    let original: string
-    try {
-      original = await readFile(target.real, 'utf8')
-    } catch {
-      return fail(`File not found: ${args.file_path}. Use Write to create a new file.`)
+    const read = await readStrictUtf8(target.real)
+    if (!read.ok) {
+      return fail(
+        read.reason === 'missing'
+          ? `File not found: ${args.file_path}. Use Write to create a new file.`
+          : `${args.file_path} is not valid UTF-8 text (it may be Latin-1 or binary), so Edit would corrupt it. Use a shell command for this file.`,
+      )
     }
+    const original = read.text
     const applied = applyEdit(original, args)
     if (!applied.ok) return fail(applied.error)
 
@@ -141,7 +156,8 @@ export async function previewChange(call: ToolCall, ctx: ToolContext): Promise<s
   if (typeof args.file_path !== 'string') return undefined
   const target = await writableTarget(ctx, args.file_path)
   if (!target.ok) return undefined
-  const current = await readFile(target.real, 'utf8').catch(() => null)
+  const strict = await readStrictUtf8(target.real)
+  const current = strict.ok ? strict.text : null
   if (call.name === 'Edit') {
     if (current === null || typeof args.old_string !== 'string' || typeof args.new_string !== 'string') return undefined
     const applied = applyEdit(current, args as unknown as EditArgs)

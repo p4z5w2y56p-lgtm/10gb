@@ -52,6 +52,7 @@ export const readTool: Tool<{ file_path: string; offset?: number; limit?: number
       return fail(`File not found: ${file_path}`)
     }
     if (st.isDirectory()) return fail(`Is a directory, use LS instead: ${file_path}`)
+    if (!st.isFile()) return fail(`Not a regular file (pipe, socket or device): ${file_path}`)
     if (await isBinaryFile(r.real)) return fail(`Cannot read binary file: ${file_path}`)
 
     const start = offset ?? 1

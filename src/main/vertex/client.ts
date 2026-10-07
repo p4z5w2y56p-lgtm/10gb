@@ -102,6 +102,17 @@ export class VertexClient {
     return new VertexError(this.scrub(detail ? `${lead}: ${detail}` : lead), kind, status)
   }
 
+  /** Backoff that Stop can interrupt. */
+  private async wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return this.sleep(ms)
+    const aborted = new Promise<never>((_, reject) => {
+      if (signal.aborted) reject(this.aborted())
+      else signal.addEventListener('abort', () => reject(this.aborted()), { once: true })
+    })
+    aborted.catch(() => undefined) // no unhandled rejection if the sleep wins
+    await Promise.race([this.sleep(ms), aborted])
+  }
+
   private aborted(partial?: GenerateResult): VertexError {
     return new VertexError('The request was stopped', 'aborted', 0, partial)
   }
@@ -127,7 +138,7 @@ export class VertexClient {
           0,
         )
         if (attempt < RETRY_MAX) {
-          await this.sleep(BACKOFF_BASE_MS * 2 ** attempt)
+          await this.wait(BACKOFF_BASE_MS * 2 ** attempt, signal)
           continue
         }
         throw lastError
@@ -138,7 +149,7 @@ export class VertexClient {
       lastError = await this.httpError(res)
       const retryable = res.status === 429 || res.status >= 500
       if (!retryable || attempt === RETRY_MAX) throw lastError
-      await this.sleep(BACKOFF_BASE_MS * 2 ** attempt)
+      await this.wait(BACKOFF_BASE_MS * 2 ** attempt, signal)
     }
     throw lastError ?? new VertexError('Request failed', 'network', 0)
   }

@@ -177,6 +177,89 @@ describe('obfuscation (review focus 5)', () => {
   })
 })
 
+describe('readonly cannot be faked (own review pass)', () => {
+  const notReadonly = [
+    'PATH=/tmp/evil ls',
+    'LD_PRELOAD=./evil.so cat a.txt',
+    'GIT_PAGER=./evil git log',
+    'FOO=1 git status',
+    'env ls',
+    'env -i PATH=/tmp ls',
+    'command ls',
+    'time ls',
+    'cat ~root/.ssh/id_rsa',
+    'cat ~nobody/x',
+    'uniq a.txt out.txt',
+    'tree -o out.txt',
+    'sort --compress-program=./x a.txt',
+    'cat {~,x}/.ssh/id_rsa',
+    'ls {a,b}',
+    'cat a.{txt,md}',
+    'cat {1..3}.txt',
+  ]
+  it.each(notReadonly)('is never readonly: %s', (cmd) => {
+    expect(kind(cmd)).not.toBe('readonly')
+  })
+
+  it('still allows plain readonly shapes', () => {
+    for (const cmd of ['uniq a.txt', 'tree -L 2', 'sort a.txt', 'ls src/*.ts', 'cat ${HOME}/notes.txt', 'grep -n foo *.md']) {
+      expect(kind(cmd), cmd).toBe('readonly')
+    }
+  })
+
+  it('brace expansion in a recursive delete is never silently treated as inside the project', () => {
+    const r = classifyBash('rm -rf {~,x}/foo', ctx)
+    expect(r).toEqual(expect.objectContaining({ kind: expect.stringMatching(/deny|other/) }))
+    if (r.kind === 'other') expect(r.unparsable).toBe(true)
+  })
+
+  it('reports the paths a readonly command reads so callers can check symlinks', () => {
+    const r = classifyBash('cat package.json src/a.ts', ctx)
+    expect(r).toEqual({ kind: 'readonly', paths: ['/work/project/package.json', '/work/project/src/a.ts'] })
+  })
+})
+
+describe('writers into protected directories (own review pass)', () => {
+  const denied = [
+    'curl -o ~/.ssh/authorized_keys http://x',
+    'curl --output=~/.zshrc http://x',
+    'wget -O ~/.zshrc http://x',
+    'wget -P ~/.ssh http://x/key',
+    'tar -xf x.tar -C ~/.ssh',
+    'tar --directory=/etc -xf x.tar',
+    'unzip x.zip -d ~/.ssh',
+    'rsync -a src/ ~/.ssh/',
+    'scp host:file ~/.zshrc',
+    'echo x > ~/Library/LaunchAgents/evil.plist',
+    'echo x >> ~/.gitconfig',
+    'touch ~/.zlogin',
+    'cp evil.plist ~/Library/LaunchAgents/',
+  ]
+  it.each(denied)('denies: %s', (cmd) => {
+    expect(classifyBash(cmd, ctx).kind).toBe('deny')
+  })
+
+  it('does not deny ordinary downloads into the project', () => {
+    expect(kind('curl -o out.bin http://x')).toBe('other')
+    expect(kind('tar -xf x.tar -C vendor')).toBe('other')
+  })
+})
+
+describe('case-insensitive volumes (review finding 2)', () => {
+  const ci = { ...ctx, caseInsensitive: true }
+  it('denies case variants of protected paths', () => {
+    for (const cmd of ['echo x > .ARC/settings.json', 'echo x > ~/.SSH/authorized_keys', 'rm ~/.ZSHRC', 'tee ~/.Zshrc']) {
+      expect(classifyBash(cmd, ci).kind, cmd).toBe('deny')
+    }
+  })
+  it('treats credential reads case-insensitively', () => {
+    expect(classifyBash('cat ~/.AWS/credentials', ci).kind).toBe('other')
+  })
+  it('keeps case-sensitive behaviour by default', () => {
+    expect(classifyBash('echo x > .ARC/settings.json', ctx).kind).toBe('other')
+  })
+})
+
 describe('splitSegments', () => {
   it('splits on separators and extracts substitutions', () => {
     const { segments, unparsable } = splitSegments('a && b | c; d $(e f) `g`')
@@ -214,11 +297,23 @@ describe('protected paths', () => {
     expect(isProtectedWrite('/home/matt/.sshfoo', p, ctx.projectRoot)).toBe(false)
   })
 
+  it('is case-insensitive on request and knows the extra persistence locations', () => {
+    const p = ctx.protectedPaths
+    expect(isProtectedWrite('/work/project/.ARC/x', p, ctx.projectRoot, true)).toBe(true)
+    expect(isProtectedWrite('/work/project/.ARC/x', p, ctx.projectRoot)).toBe(false)
+    expect(isProtectedWrite('/home/matt/.SSH/id_rsa', p, ctx.projectRoot, true)).toBe(true)
+    for (const extra of ['Library/LaunchAgents/x.plist', '.gitconfig', '.zlogin', '.zlogout', '.bash_login', '.config/git/config']) {
+      expect(isProtectedWrite(`/home/matt/${extra}`, p, ctx.projectRoot), extra).toBe(true)
+    }
+  })
+
   it('marks credential material as sensitive to read', () => {
     const s = ctx.sensitivePaths
     expect(isSensitiveRead('/home/matt/.aws/credentials', s)).toBe(true)
     expect(isSensitiveRead('/work/project/deploy/id_rsa', s)).toBe(true)
     expect(isSensitiveRead('/work/project/certs/server.pem', s)).toBe(true)
     expect(isSensitiveRead('/work/project/README.md', s)).toBe(false)
+    expect(isSensitiveRead('/home/matt/.AWS/credentials', s, true)).toBe(true)
+    expect(isSensitiveRead('/home/matt/.AWS/credentials', s)).toBe(false)
   })
 })

@@ -199,8 +199,12 @@ rule in settings or does the thing themselves.
   (`git reset --hard` and `git clean -fd` are *ask* in every mode except Auto,
   where they run under the OS sandbox.)
 - Writes (any tool, any redirect) to: `~/.ssh`, `~/.aws`, `~/.config/gcloud`,
-  `~/Library/Keychains`, `/etc`, `/System`, `/Library`, shell rc files
-  (`~/.zshrc`, `~/.bash_profile`, ...), and ARC's own settings/secrets/audit files.
+  `~/Library/Keychains`, `~/Library/LaunchAgents`, `/etc`, `/System`, `/Library`,
+  shell rc and login files (`~/.zshrc`, `~/.bash_profile`, `~/.zlogin`, ...),
+  `~/.gitconfig`, `~/.config/git`, and ARC's own settings/secrets/audit/rules files.
+  Path comparisons are case-insensitive on case-insensitive volumes (default APFS).
+  Commands that write wherever an argument points (`curl -o`, `wget -O`, `tar -C`,
+  `unzip -d`, `rsync`, `scp`) are checked against the same list.
 - Reads of private key material and credential files (`id_rsa`, `*.pem` private
   keys, `~/.aws/credentials`, ARC's secrets store) are *ask* with a loud warning.
 - Fork bombs and similar (`:(){ :|:& };:`).
@@ -223,8 +227,14 @@ rule in settings or does the thing themselves.
   group is killed on timeout or Stop.
 - **OS sandbox in Auto mode.** Bash runs under macOS `sandbox-exec` with a profile
   that allows reads broadly but **writes only under the project root and the OS
-  temp dir**. This is a real kernel-level boundary, which a regex guard is not.
-  If `sandbox-exec` is unavailable, Auto mode degrades Bash to "ask" and says so.
+  temp dir**, minus `<project>/.arc` and `<project>/.git/hooks`, which are re-denied
+  (hooks run later, outside the sandbox). This is a real kernel-level boundary,
+  which a regex guard is not. If `sandbox-exec` is unavailable, Auto mode degrades
+  Bash to "ask" and says so.
+- **Read-only auto-allow is strict.** A command is read-only only if it has no
+  env assignments or wrappers (`PATH=... ls`, `env ls`), no argument we cannot
+  resolve, no brace expansion, no flag that writes or runs something, and none of
+  the paths it reads resolve (through symlinks) into credential locations.
 
 Honest limit: the command parser is best-effort. It catches the common dangerous
 shapes and nudges everything unclear to "ask", but it is not a proof. The OS
@@ -251,8 +261,11 @@ shows the current mode (Auto is visually loud). `Shift+Tab` cycles modes; the
 Auto step re-confirms.
 
 Ask-mode prompts offer **Allow once**, **Always allow this** (saves a scoped rule,
-e.g. a command prefix like `npm test`, to the project's ARC settings; never for
-anything in 6.2), and **Deny** (with an optional note sent back to the model).
+e.g. a command prefix like `npm test`, in ARC's data folder keyed by project;
+never inside the project, so a cloned repo cannot pre-approve commands; never for
+anything in 6.2, and never for interpreters or wrappers like `python3 -c` or
+`bash -c`, which would approve any inline program; a saved Bash rule never covers
+a command that redirects output somewhere new), and **Deny** (with an optional note sent back to the model).
 
 ### 6.6 Other protections
 
@@ -463,8 +476,8 @@ is 6.1:1. `brand-blue` is decoration only (3.2:1). Focus rings use `signal`.
 - Sessions: `.../sessions/<project-hash>/<id>.jsonl`.
 - Checkpoints: `.../checkpoints/<session-id>/` (pre-edit file snapshots).
 - Audit log: `.../audit/<session-id>.jsonl`.
-- Per-project rules ("always allow this"): `<project>/.arc/settings.json`, which the
-  agent's own tools cannot write (hard deny on `.arc/`).
+- Per-project rules ("always allow this"): `.../AIVEN ARC/rules/<project hash>.json`,
+  never inside the project. `<project>/.arc/` stays hard-denied for the agent.
 
 ## 11. Testing
 

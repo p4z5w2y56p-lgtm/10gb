@@ -29,6 +29,8 @@ export interface ToolContext {
   settings: { bashTimeoutMs: number }
   home: string
   protectedPaths: string[]
+  /** Compare protected paths case-insensitively (default APFS volumes). */
+  caseInsensitive?: boolean
   /** Extra environment variable names to scrub from child processes. */
   arcEnv: string[]
 }

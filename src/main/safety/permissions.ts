@@ -1,7 +1,7 @@
-import { isAbsolute, resolve } from 'node:path'
+import { basename, isAbsolute, resolve } from 'node:path'
 import type { AllowRule, PermissionMode, ToolCall, ToolName, Verdict } from '../../shared/types'
 import { classifyBash, splitSegments } from './bashGuard'
-import { resolveInside } from './pathSandbox'
+import { realpathOrAncestor, resolveInside } from './pathSandbox'
 import { isProtectedWrite, isSensitiveRead, sensitiveReadPaths } from './protected'
 
 export interface DecisionContext {
@@ -40,8 +40,31 @@ export function commandPrefixForRule(cmd: string): string {
   return first.split(/\s+/).filter(Boolean).slice(0, 2).join(' ')
 }
 
+/** Commands whose first two words do not say what will run: interpreters, wrappers, and find. */
+const NO_RULE = new Set([
+  'sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh',
+  'python', 'python2', 'python3', 'perl', 'ruby', 'node', 'php', 'osascript',
+  'eval', 'source', '.', 'env', 'xargs', 'sudo', 'su', 'doas', 'exec', 'command', 'builtin',
+  'nohup', 'time', 'nice', 'timeout', 'find', 'awk',
+])
+
+/** Whether "always allow" may save a rule for this prefix. `python3 -c` would approve any inline program. */
+export function isRuleEligible(prefix: string): boolean {
+  const first = basename(prefix.trim().split(/\s+/)[0] ?? '')
+  return first !== '' && !NO_RULE.has(first)
+}
+
+/** A command with a redirect that writes somewhere is not what the user approved, except harmless stream plumbing. */
+function hasRealRedirect(command: string): boolean {
+  const stripped = command
+    .replace(/\s\d?>&\d\b/g, ' ')
+    .replace(/\s(?:\d?>>?|&>>?)\s*\/dev\/null\b/g, ' ')
+  return /[<>]/.test(stripped)
+}
+
 function bashRuleMatches(rule: AllowRule, command: string): boolean {
-  if (rule.tool !== 'Bash' || !rule.prefix) return false
+  if (rule.tool !== 'Bash' || !rule.prefix || !isRuleEligible(rule.prefix)) return false
+  if (hasRealRedirect(command)) return false
   const { segments, unparsable } = splitSegments(command)
   if (unparsable || segments.length !== 1) return false
   const text = segments[0]
@@ -63,13 +86,13 @@ async function decideRead(call: ToolCall, ctx: DecisionContext): Promise<Verdict
   const target = str(call.args.file_path) ?? str(call.args.path) ?? '.'
   const sensitive = ctx.sensitivePaths ?? sensitiveReadPaths(ctx.home, '')
   const abs = isAbsolute(target) ? resolve(target) : resolve(ctx.projectRoot, target)
-  if (isSensitiveRead(abs, sensitive)) return ask(`This looks like a credential file: ${target}`)
+  if (isSensitiveRead(abs, sensitive, ctx.caseInsensitive)) return ask(`This looks like a credential file: ${target}`)
   const r = await resolveInside(ctx.projectRoot, target, {
     extraDirs: ctx.extraDirs,
     caseInsensitive: ctx.caseInsensitive,
   })
-  if (!r.ok) return ask(`Reads outside the project: ${target}`)
-  if (isSensitiveRead(r.real, sensitive)) return ask(`This resolves to a credential file: ${target}`)
+  if (!r.ok) return r.reason.startsWith('Cannot resolve') ? deny(r.reason) : ask(`Reads outside the project: ${target}`)
+  if (isSensitiveRead(r.real, sensitive, ctx.caseInsensitive)) return ask(`This resolves to a credential file: ${target}`)
   return allow('read inside the project')
 }
 
@@ -77,7 +100,7 @@ async function decideWrite(call: ToolCall, ctx: DecisionContext): Promise<Verdic
   const target = str(call.args.file_path)
   if (!target) return deny('No file path given')
   const abs = isAbsolute(target) ? resolve(target) : resolve(ctx.projectRoot, target)
-  if (isProtectedWrite(abs, ctx.protectedPaths, ctx.projectRoot)) {
+  if (isProtectedWrite(abs, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive)) {
     return deny(`Writing to a protected path is never allowed: ${target}`)
   }
   const r = await resolveInside(ctx.projectRoot, target, {
@@ -85,14 +108,14 @@ async function decideWrite(call: ToolCall, ctx: DecisionContext): Promise<Verdic
     caseInsensitive: ctx.caseInsensitive,
   })
   if (!r.ok) return deny(`Writes outside the project are not allowed: ${target}`)
-  if (isProtectedWrite(r.real, ctx.protectedPaths, ctx.projectRoot)) {
+  if (isProtectedWrite(r.real, ctx.protectedPaths, ctx.projectRoot, ctx.caseInsensitive)) {
     return deny(`Writing to a protected path is never allowed: ${target}`)
   }
   if (ctx.mode === 'ask') return ask(`${call.name} ${target}`)
   return allow(`${ctx.mode} mode allows edits inside the project`, 'mode')
 }
 
-function decideBash(call: ToolCall, ctx: DecisionContext): Verdict {
+async function decideBash(call: ToolCall, ctx: DecisionContext): Promise<Verdict> {
   const command = str(call.args.command)
   if (!command) return deny('No command given')
   const cls = classifyBash(command, {
@@ -100,9 +123,23 @@ function decideBash(call: ToolCall, ctx: DecisionContext): Verdict {
     home: ctx.home,
     protectedPaths: ctx.protectedPaths,
     sensitivePaths: ctx.sensitivePaths,
+    caseInsensitive: ctx.caseInsensitive,
   })
   if (cls.kind === 'deny') return deny(`Blocked: ${cls.reason}`)
-  if (cls.kind === 'readonly') return allow('read-only command', 'readonly')
+  if (cls.kind === 'readonly') {
+    // The parser only sees names; a symlink inside the project can still lead to ~/.ssh.
+    const sensitive = ctx.sensitivePaths ?? sensitiveReadPaths(ctx.home, '')
+    for (const p of cls.paths) {
+      let real: string
+      try {
+        real = await realpathOrAncestor(p)
+      } catch {
+        return ask(`Could not verify where this path leads: ${p}`)
+      }
+      if (isSensitiveRead(real, sensitive, ctx.caseInsensitive)) return ask(`This resolves to a credential file: ${p}`)
+    }
+    return allow('read-only command', 'readonly')
+  }
   if (ruleAllows(call, ctx)) return allow('matches an always-allow rule', 'rule')
   if (ctx.mode === 'auto') {
     return ctx.sandboxAvailable
@@ -136,7 +173,7 @@ export async function decide(call: ToolCall, ctx: DecisionContext): Promise<Verd
       verdict = await decideWrite(call, ctx)
       break
     case 'Bash':
-      return decideBash(call, ctx)
+      return await decideBash(call, ctx)
     case 'WebFetch':
       verdict = ctx.mode === 'auto' ? allow('auto mode', 'mode') : ask('Fetch a web page')
       break

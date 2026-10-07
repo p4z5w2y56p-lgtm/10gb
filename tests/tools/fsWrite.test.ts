@@ -101,6 +101,38 @@ describe('Edit', () => {
   })
 })
 
+describe('Edit and non-UTF-8 files (review finding 6)', () => {
+  it('refuses to edit a Latin-1 file instead of corrupting it', async () => {
+    const bytes = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a, 0x78, 0x0a])
+    await writeFile(file('l1.txt'), bytes)
+    const r = await editTool.run({ file_path: 'l1.txt', old_string: 'x', new_string: 'y' }, fx.ctx)
+    expect(r.ok).toBe(false)
+    expect(r.output).toContain('UTF-8')
+    expect((await readFile(file('l1.txt'))).equals(bytes)).toBe(true)
+  })
+
+  it('still edits UTF-8 files with accents, emoji and a BOM', async () => {
+    await writeFile(file('u.txt'), '\uFEFFcafé 😀\nx\n')
+    const r = await editTool.run({ file_path: 'u.txt', old_string: 'x', new_string: 'y' }, fx.ctx)
+    expect(r.ok).toBe(true)
+    expect(await readFile(file('u.txt'), 'utf8')).toBe('\uFEFFcafé 😀\ny\n')
+  })
+
+  it('previews nothing for a non-UTF-8 file', async () => {
+    await writeFile(file('l1.txt'), Buffer.from([0xe9, 0x0a]))
+    expect(await previewChange({ id: 'p', name: 'Edit', args: { file_path: 'l1.txt', old_string: 'a', new_string: 'b' } }, fx.ctx)).toBeUndefined()
+  })
+})
+
+describe('protected paths on case-insensitive volumes (review finding 2)', () => {
+  it('Write refuses a case variant of .arc', async () => {
+    const ctx = { ...fx.ctx, caseInsensitive: true, protectedPaths: protectedWritePaths(fx.ctx.home, '') }
+    const r = await writeTool.run({ file_path: '.ARC/settings.json', content: '{}' }, ctx)
+    expect(r.ok).toBe(false)
+    expect(r.output).toContain('protected')
+  })
+})
+
 describe('Write', () => {
   it('creates a new file and missing parent directories', async () => {
     const r = await writeTool.run({ file_path: 'deep/er/new.txt', content: 'hi\n' }, fx.ctx)

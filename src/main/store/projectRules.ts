@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
@@ -12,12 +13,15 @@ const FileSchema = z.object({ rules: z.array(RuleSchema) })
 
 const same = (a: AllowRule, b: AllowRule) => a.tool === b.tool && (a.prefix ?? '') === (b.prefix ?? '')
 
-/** "Always allow" rules saved per project in `<project>/.arc/settings.json`. */
+/**
+ * "Always allow" rules saved per project in ARC's own data folder, never inside the
+ * project: a cloned repository must not be able to pre-approve commands for you.
+ */
 export class ProjectRules {
   private readonly file: string
 
-  constructor(projectRoot: string) {
-    this.file = join(projectRoot, '.arc', 'settings.json')
+  constructor(rulesDir: string, projectRoot: string) {
+    this.file = join(rulesDir, `${createHash('sha1').update(projectRoot).digest('hex').slice(0, 12)}.json`)
   }
 
   async load(): Promise<AllowRule[]> {

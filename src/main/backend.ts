@@ -236,7 +236,7 @@ export class BackendApp {
     const sandboxAvailable = this.deps.sandboxAvailable ?? detectSandboxExec()
     const audit = new AuditLog(join(dataDir, 'audit'), handle.id, () => (this.cache ? [this.cache.key] : []))
     const checkpoints = new CheckpointStore(join(dataDir, 'checkpoints'), handle.id)
-    const rules = new ProjectRules(root)
+    const rules = new ProjectRules(join(dataDir, 'rules'), root)
     const arcMd = await loadProjectMemory(root)
 
     const coder = {

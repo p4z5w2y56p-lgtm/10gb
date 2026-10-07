@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec'
 
@@ -28,6 +29,9 @@ export function buildSandboxProfile(projectRoot: string, tmpDir: string): string
     '  (literal "/dev/tty")',
     '  (literal "/dev/dtracehelper")',
     '  (regex #"^/dev/ttys[0-9]+$"))',
+    // Re-deny after the allow: these would otherwise be writable as part of the project.
+    // .arc is ARC's own area; git hooks run later, outside the sandbox.
+    `(deny file-write* (subpath ${sbplString(join(projectRoot, '.arc'))}) (subpath ${sbplString(join(projectRoot, '.git', 'hooks'))}))`,
     '',
   ].join('\n')
 }
