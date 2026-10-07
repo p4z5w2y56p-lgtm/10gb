@@ -1,7 +1,10 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023", "DOM"],
+    "lib": [
+      "ES2023",
+      "DOM"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
@@ -11,7 +14,16 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noUncheckedIndexedAccess": false,
-    "types": ["node"]
+    "types": [
+      "node",
+      "@testing-library/jest-dom"
+    ],
+    "jsx": "react-jsx"
   },
-  "include": ["src", "tests", "scripts", "*.ts"]
+  "include": [
+    "src",
+    "tests",
+    "scripts",
+    "*.ts"
+  ]
 }

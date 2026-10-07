@@ -1,0 +1,100 @@
+/*
+  AIVEN design tokens. The AI theme (dark, glass, orange and cyan) is ARC's default;
+  the Studios theme (light, black on paper) swaps colours only. Source of truth:
+  the AIVEN design system. No raw colour values belong anywhere else in the renderer.
+*/
+
+:root {
+  /* Shape and rhythm, shared by both themes */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-pill: 100px;
+  --space-12: 12px;
+  --space-15: 15px;
+  --space-20: 20px;
+  --space-24: 24px;
+  --space-30: 30px;
+  --space-40: 40px;
+  --blur-glass: 20px;
+
+  /* Type */
+  --font-ui: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Motion */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --dur: 200ms;
+  --dur-fast: 140ms;
+}
+
+:root[data-theme="ai"] {
+  color-scheme: dark;
+  --surface: #020203;
+  --surface-panel: rgba(15, 15, 20, 0.4);
+  --surface-deep: rgba(0, 0, 0, 0.5);
+  --surface-field: rgba(0, 0, 0, 0.4);
+  --surface-raised: rgba(255, 255, 255, 0.04);
+  --ink: #f0f0f5;
+  --ink-heading: #f0f0f5;
+  --ink-muted: #8a8a9e;
+  --ink-on-deep: #f0f0f5;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --accent: #ff6b00;
+  --accent-ink: #000000;
+  --accent-soft: rgba(255, 107, 0, 0.12);
+  --signal: #00e5ff;
+  --signal-soft: rgba(0, 229, 255, 0.1);
+  --success: #00ff88;
+  --success-strong: #00c851;
+  --warning: #ffbb33;
+  --danger: #ff4444;
+  --danger-soft: rgba(255, 68, 68, 0.12);
+  --shadow-panel: 0 16px 40px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  --shadow-cta: 0 0 20px rgba(255, 107, 0, 0.2);
+  --shadow-signal: 0 0 15px rgba(0, 229, 255, 0.2);
+  --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --glow-orange: rgba(255, 107, 0, 0.07);
+  --glow-blue: rgba(0, 68, 255, 0.07);
+  --term-bg: rgba(3, 3, 5, 0.9);
+  --term-ink: #e6e6ea;
+  --diff-add: rgba(0, 255, 136, 0.1);
+  --diff-del: rgba(255, 68, 68, 0.12);
+}
+
+:root[data-theme="studios"] {
+  color-scheme: light;
+  --surface: #f7f7f9;
+  --surface-panel: #ffffff;
+  --surface-deep: rgba(3, 3, 3, 0.04);
+  --surface-field: #ffffff;
+  --surface-raised: rgba(3, 3, 3, 0.03);
+  --ink: #030303;
+  --ink-heading: #111111;
+  --ink-muted: #666666;
+  --ink-on-deep: #030303;
+  --border: #e2e2e5;
+  --border-strong: #c9c9ce;
+  --accent: #030303;
+  --accent-ink: #f7f7f9;
+  --accent-soft: rgba(3, 3, 3, 0.06);
+  --signal: #111111;
+  --signal-soft: rgba(3, 3, 3, 0.06);
+  --success: #0b7a43;
+  --success-strong: #0b7a43;
+  --warning: #8a5300;
+  --danger: #b3261e;
+  --danger-soft: rgba(179, 38, 30, 0.1);
+  --shadow-panel: 0 10px 20px rgba(0, 0, 0, 0.1);
+  --shadow-cta: 0 10px 30px rgba(0, 0, 0, 0.15);
+  --shadow-signal: none;
+  --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.18);
+  --glow-orange: transparent;
+  --glow-blue: transparent;
+  --term-bg: rgba(3, 3, 5, 0.92);
+  --term-ink: #e6e6ea;
+  --diff-add: rgba(11, 122, 67, 0.12);
+  --diff-del: rgba(179, 38, 30, 0.12);
+}

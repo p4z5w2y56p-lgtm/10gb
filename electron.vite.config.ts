@@ -1,4 +1,5 @@
 import { resolve } from 'node:path'
+import react from '@vitejs/plugin-react'
 import { defineConfig } from 'electron-vite'
 
 export default defineConfig({
@@ -15,6 +16,7 @@ export default defineConfig({
     },
   },
   renderer: {
+    plugins: [react()],
     root: 'src/renderer',
     build: { rollupOptions: { input: resolve('src/renderer/index.html') } },
   },
