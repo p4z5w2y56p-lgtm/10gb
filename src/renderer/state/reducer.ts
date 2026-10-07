@@ -1,4 +1,5 @@
 import type { BackendStatus } from '../../main/backend'
+import type { CloudDiff, CloudSessionInfo, CloudStatus } from '../../shared/cloud'
 import { describeCall } from '../../main/agent/narrate'
 import type { SessionMeta } from '../../main/store/sessions'
 import type { Settings } from '../../main/store/settings'
@@ -14,7 +15,7 @@ import type {
   ToolCall,
 } from '../../shared/types'
 
-export type SettingsSection = 'models' | 'permissions' | 'spark' | 'appearance' | 'advanced' | 'audit' | 'about'
+export type SettingsSection = 'models' | 'permissions' | 'spark' | 'cloud' | 'appearance' | 'advanced' | 'audit' | 'about'
 
 export type ActivityState = 'running' | 'done' | 'failed' | 'denied'
 
@@ -49,6 +50,7 @@ export interface AppState {
   app: BackendStatus | null
   settings: Settings | null
   sessions: SessionMeta[]
+  cloud: { status: CloudStatus | null; sessions: CloudSessionInfo[]; diff: CloudDiff | null }
   ui: {
     sidebar: boolean
     settingsOpen: boolean
@@ -56,6 +58,8 @@ export interface AppState {
     paletteOpen: boolean
     shortcutsOpen: boolean
     showDetails: boolean
+    cloudStartOpen: boolean
+    prOpen: boolean
   }
   seq: number
 }
@@ -75,6 +79,7 @@ export const initialState: AppState = {
   app: null,
   settings: null,
   sessions: [],
+  cloud: { status: null, sessions: [], diff: null },
   ui: {
     sidebar: true,
     settingsOpen: false,
@@ -82,6 +87,8 @@ export const initialState: AppState = {
     paletteOpen: false,
     shortcutsOpen: false,
     showDetails: false,
+    cloudStartOpen: false,
+    prOpen: false,
   },
   seq: 0,
 }
@@ -98,6 +105,8 @@ export type Action =
       changes?: { files: string[]; canUndo: boolean }
     }
   | { type: 'ui'; patch: Partial<AppState['ui']> }
+  | { type: 'cloud'; status?: CloudStatus | null; sessions?: CloudSessionInfo[]; diff?: CloudDiff | null }
+  | { type: 'question-answered' }
   | { type: 'history'; history: Content[] }
   | { type: 'reset' }
 
@@ -225,11 +234,22 @@ export function reduce(s: AppState, a: Action): AppState {
       }
     case 'ui':
       return { ...s, ui: { ...s.ui, ...a.patch } }
+    case 'cloud':
+      return {
+        ...s,
+        cloud: {
+          status: a.status !== undefined ? a.status : s.cloud.status,
+          sessions: a.sessions !== undefined ? a.sessions : s.cloud.sessions,
+          diff: a.diff !== undefined ? a.diff : s.cloud.diff,
+        },
+      }
+    case 'question-answered':
+      return { ...s, question: null }
     case 'history': {
       const rebuilt = itemsFromHistory(a.history)
       return { ...s, transcript: rebuilt.transcript, seq: rebuilt.seq, todos: [], approval: null, question: null, busy: false }
     }
     case 'reset':
-      return { ...s, transcript: [], todos: [], suggestions: [], approval: null, question: null, busy: false, usage: initialState.usage, status: initialState.status }
+      return { ...s, cloud: { ...s.cloud, diff: null }, transcript: [], todos: [], suggestions: [], approval: null, question: null, busy: false, usage: initialState.usage, status: initialState.status }
   }
 }

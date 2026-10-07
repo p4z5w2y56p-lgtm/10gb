@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react'
 import type { SettingsPatch } from '../../main/store/settings'
+import type { CloudSecretName, CloudStartRequest, PullRequestResult, PushResult } from '../../shared/cloud'
 import type { PermissionMode } from '../../shared/types'
 import { ArcError, createClient, type Arc, type ArcClient, type OpenedProject } from '../arc/client'
 import { initialState, reduce, type Action, type AppState } from './reducer'
@@ -31,6 +32,16 @@ export interface Actions {
   spark(): Promise<void>
   undo(): Promise<void>
   setAutopilot(on: boolean): Promise<void>
+  cloudRefresh(): Promise<void>
+  cloudStart(req: CloudStartRequest): Promise<void>
+  cloudAttach(id: string): Promise<void>
+  cloudLeave(): Promise<void>
+  cloudEnd(id: string): Promise<void>
+  cloudDiff(): Promise<void>
+  cloudPush(): Promise<PushResult>
+  cloudPr(req: { title: string; body?: string; draft?: boolean }): Promise<PullRequestResult>
+  cloudSetSecret(name: CloudSecretName, value: string): Promise<void>
+  cloudClearSecret(name: CloudSecretName): Promise<void>
   ui(patch: Partial<AppState['ui']>): void
   notify(level: 'info' | 'warn' | 'error', message: string): void
 }
@@ -61,15 +72,32 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
     [],
   )
 
+  /** Cloud setup and the worker's sessions. An unreachable worker just means an empty list. */
+  const cloudRefresh = useCallback(async () => {
+    try {
+      const status = await api.cloudStatus()
+      dispatch({ type: 'cloud', status: status ?? null })
+      if (status?.configured) {
+        const sessions = await api.cloudSessions().catch(() => [])
+        dispatch({ type: 'cloud', sessions: sessions ?? [] })
+      } else {
+        dispatch({ type: 'cloud', sessions: [] })
+      }
+    } catch {
+      dispatch({ type: 'cloud', sessions: [] })
+    }
+  }, [api])
+
   const refresh = useCallback(async () => {
     try {
       const [app, loaded, changes] = await Promise.all([api.status(), api.getSettings(), api.changes()])
       const sessions = app.hasProject ? await api.listSessions().catch(() => []) : []
       dispatch({ type: 'loaded', app, settings: loaded.settings, sessions, mode: app.mode, changes })
+      void cloudRefresh()
     } catch (err) {
       notify('error', err instanceof Error ? err.message : String(err))
     }
-  }, [api, notify])
+  }, [api, notify, cloudRefresh])
 
   /** A backend call that failed: show why, free the composer, and re-check whether we are locked. */
   const failed = useCallback(
@@ -177,6 +205,7 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
       async answer(text) {
         const pending = stateRef.current.question
         if (!pending) return
+        dispatch({ type: 'question-answered' })
         try {
           await api.answer(pending.id, text)
         } catch (err) {
@@ -206,10 +235,63 @@ export function AppProvider({ arc, children }: { arc: Arc; children: ReactNode }
           notify('error', err instanceof Error ? err.message : String(err))
         }
       },
+      cloudRefresh,
+      async cloudStart(req) {
+        await enter(await api.cloudStart(req))
+        dispatch({ type: 'ui', patch: { cloudStartOpen: false } })
+        await cloudRefresh()
+      },
+      async cloudAttach(id) {
+        try {
+          await enter(await api.cloudAttach(id))
+          await cloudRefresh()
+        } catch (err) {
+          notify('error', err instanceof Error ? err.message : String(err))
+        }
+      },
+      async cloudLeave() {
+        try {
+          const status = await api.cloudLeave()
+          dispatch({ type: 'reset' })
+          dispatch({ type: 'loaded', app: status })
+          await refresh()
+        } catch (err) {
+          notify('error', err instanceof Error ? err.message : String(err))
+        }
+      },
+      async cloudEnd(id) {
+        try {
+          await api.cloudEnd(id)
+          await refresh()
+        } catch (err) {
+          notify('error', err instanceof Error ? err.message : String(err))
+        }
+      },
+      async cloudDiff() {
+        try {
+          dispatch({ type: 'cloud', diff: await api.cloudDiff() })
+        } catch (err) {
+          notify('error', err instanceof Error ? err.message : String(err))
+        }
+      },
+      async cloudPush() {
+        const result = await api.cloudPush()
+        dispatch({ type: 'cloud', diff: await api.cloudDiff().catch(() => null) })
+        return result
+      },
+      cloudPr: (req) => api.cloudPr(req),
+      async cloudSetSecret(name, value) {
+        dispatch({ type: 'cloud', status: await api.cloudSetSecret(name, value) })
+        if (name === 'cloud-token') await cloudRefresh()
+      },
+      async cloudClearSecret(name) {
+        dispatch({ type: 'cloud', status: await api.cloudClearSecret(name) })
+        if (name === 'cloud-token') dispatch({ type: 'cloud', sessions: [] })
+      },
       ui: (patch) => dispatch({ type: 'ui', patch }),
       notify,
     }),
-    [api, enter, failed, notify, refresh],
+    [api, cloudRefresh, enter, failed, notify, refresh],
   )
 
   useEffect(() => api.onEvent((event) => dispatch({ type: 'event', event })), [api])
