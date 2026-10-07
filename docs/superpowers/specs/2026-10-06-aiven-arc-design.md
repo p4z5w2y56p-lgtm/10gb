@@ -531,3 +531,108 @@ is 6.1:1. `brand-blue` is decoration only (3.2:1). Focus rings use `signal`.
    checklist.
 9. **Packaging as a Mac app happens last and only after Matt confirms the design
    and features are to his liking.** Until then the build stays a dev build.
+
+## 14. ARC Cloud (added on request: "work in the cloud, like Claude Code on the web")
+
+Matt asked for sessions that run in the cloud, with "Idk, github or google cloud or?" as the
+provider choice. **Ruling:** GitHub holds the code, and the agent runs on a *worker* the user deploys
+(Google Cloud Run by default, any Docker host works). Matt owns the worker and its keys; nothing is
+hosted by us. Reasons: ARC already talks to Vertex, so Google Cloud is the natural home, and GitHub is the
+only place that gives clone, branch, push and pull request in one API.
+
+### 14.1 What the user gets
+
+- **New cloud session**: pick a GitHub repo (`owner/name` or URL) and a base branch. The worker clones it,
+  creates `arc/<name>-<4 hex>`, and the same agent (tools, safety, Spark, Autopilot) runs there.
+- **It keeps going when the laptop sleeps or the app closes.** Reopen ARC, the Cloud list shows the
+  session, attach, and the transcript and live progress come back. Autopilot can run unattended.
+- **Nothing is lost.** With auto-push on (default), each finished turn is committed and pushed to the
+  `arc/` branch. **Push to GitHub** and **Open pull request** are buttons in the Changes popover.
+- Same screens as local. The header shows a `CLOUD` chip with `owner/repo` and the branch. Raw code stays
+  under Details. Approvals, questions, undo, modes and Spark work identically.
+
+### 14.2 Architecture
+
+```
+ARC app (Electron)                          ARC worker (Docker, Cloud Run)
+ renderer -- IPC --> BackendRouter  ==HTTPS+SSE==>  server.ts -> CloudWorker -> BackendApp (one per session)
+                      |-> BackendApp (local)                                      |-> GitWorkspace (git CLI)
+                      '-> CloudClient                                             '-> GithubApi (REST)
+```
+
+- `Backend` (`src/main/backendApi.ts`) is the surface the IPC handlers drive. `BackendApp` is the local
+  half; `BackendRouter` implements all of it and sends session calls to the local app or the attached cloud
+  session. The renderer does not know the difference except through `status.cloud`.
+- The worker reuses `BackendApp` unchanged for the agent, so all safety (decide(), bash guard, path
+  sandbox, hard denies, audit, checkpoints) is the same code path as local.
+- Wire protocol: `src/main/cloud/protocol.ts` (JSON over HTTPS, events over SSE with replay).
+- Shared contracts: `src/shared/cloud.ts`.
+
+### 14.3 Secrets and trust
+
+- Three secrets: the **worker token** (authorizes the app to the worker), the **GitHub token**, and the
+  **Vertex key** (already stored). They are saved on the Mac through the same encrypted store as the Vertex
+  key (`setSecret`/`getSecret` on `KeyStore`), entered in Settings, never in settings.json or logs.
+- The app sends the GitHub token and Vertex key to the worker **per session, over TLS** (the client refuses
+  `http://` except for localhost). The worker keeps them **in memory only**, never on disk, never in the
+  agent's environment, never in logs or audit entries (they are added to the redaction list).
+- Worker auth: `Authorization: Bearer <ARC_CLOUD_TOKEN>`. The worker refuses to start with a token shorter
+  than 32 characters, compares with a constant-time check, rate-limits failures, and answers
+  `/health` with nothing but `{ ok: true }`. No CORS headers.
+- Limits: body 1 MB, `ARC_MAX_SESSIONS` (default 4), idle expiry (default 24 h with no activity and not
+  busy), 5 SSE streams per session, SSE replay buffer 10 000 events or 8 MB.
+- **Trust model (stated plainly):** the worker is single-tenant: one person's box. The container is the
+  boundary, not a per-session uid. The agent's shell cannot see the tokens (environment scrubbed, nothing on
+  disk), but code running in the same container as the same user is not hardened against reading process
+  memory. Mitigations: fine-grained GitHub token limited to the chosen repos; a Cloud Run service account
+  with **zero roles**; Bash hard-denies the cloud metadata endpoints. Running agent commands as a separate
+  uid is a documented follow-up.
+
+### 14.4 Git handling (the risky part)
+
+- Repo input is parsed by `parseRepoRef`: only `https://<host>/<owner>/<name>(.git)` or `owner/name`, host
+  `github.com` by default (extra hosts via `ARC_GITHUB_HOSTS` for GitHub Enterprise). `file:`, `ssh:`,
+  `git:`, `ext::`, option-looking input and credentials in URLs are rejected.
+- Branches: `arc/` prefix only, names validated (`isSafeBranchName`). The worker pushes only
+  `HEAD:refs/heads/arc/...`, **never with force**, and never to the base/default branch.
+- Server-side git runs with a sanitized environment: `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_SYSTEM=/dev/null`, `GIT_TERMINAL_PROMPT=0`, `-c core.hooksPath=/dev/null`,
+  `-c core.fsmonitor=false`, `-c protocol.allow=never -c protocol.https.allow=always`, no submodule
+  recursion, explicit remote URL (never read from `.git/config`), credentials supplied through `GIT_ASKPASS`
+  with the token only in the child's environment for network operations, `--no-verify` on commits.
+- **Config tamper check:** before any networked git call, `git config --local --list -z` must contain only
+  an allow-list of harmless keys (`core.repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|
+  precomposeunicode|symlinks`, `remote.origin.url|fetch`, `branch.*.remote|merge`, `user.name|email`), and
+  `remote.origin.url` must equal the validated URL, and `.git` must be a real directory. Anything else (a
+  `url.*.insteadOf`, `credential.*`, `core.sshCommand`, `include.path`, ...) makes the push fail with a plain
+  message. The agent cannot make the worker send the token somewhere else this way.
+- **Staging filter:** `git add -A`, then newly added files that look like secrets (`.env*`, `*.pem`,
+  `*.key`, `id_rsa*`, `*.p12`, `.npmrc`, `credentials*`, files containing a private-key block) or are larger
+  than 10 MB are unstaged and reported in `PushResult.skipped` and a notice.
+- Commits use author `AIVEN ARC <arc@users.noreply.github.com>`, message `arc: <first line of the last
+  prompt>` (72 chars).
+- Pull requests use the GitHub REST API (`POST /repos/{o}/{r}/pulls`); an existing open PR for the branch is
+  reused. Needs a token with Contents and Pull requests write on that repo.
+
+### 14.5 Behaviour on the worker
+
+- Permission modes work as local. In `auto` mode the container is the sandbox, so `sandbox-exec` is not used
+  and the bash guard's hard denies still hold. New hard deny: `curl`/`wget`/any command naming
+  `metadata.google.internal`, `metadata.goog`, `169.254.169.254` or `fd00:ec2::254`.
+- Sessions live in worker memory plus its disk. A worker restart ends them; the client says so ("The cloud
+  session ended because the worker restarted. Your pushed branch is safe on GitHub.").
+- Cloud Run needs `--max-instances=1 --min-instances=1 --no-cpu-throttling --timeout=3600` (sessions are in
+  memory; the agent keeps working between requests). SSE streams reconnect every hour on their own.
+
+### 14.6 Screens
+
+Settings gets a **Cloud** pane (worker URL, worker token, GitHub token, test, auto-push, deploy commands to
+copy). The sidebar gets a **Cloud** section (New cloud session, the worker's sessions with a live dot). A
+**Start cloud session** dialog (repo, base branch, optional name, progress). The Changes popover gets
+**Push to GitHub** and **Open pull request**. Same premium AIVEN treatment as every other screen.
+
+### 14.7 Not verifiable on Linux
+
+A real Cloud Run deploy, real GitHub (clone/push/PR with a real token), the real Vertex key from the cloud.
+Everything else (HTTP/SSE, auth, git with a local bare remote, GitHub REST against a fake, the agent on the
+worker with the fake Vertex server) is tested here. Items go on the Mac/GCP checklist in the README.
