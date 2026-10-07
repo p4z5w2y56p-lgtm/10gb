@@ -22,6 +22,18 @@ export const IPC = {
   auditRead: 'audit:read',
   spark: 'prompter:spark',
   autopilot: 'prompter:autopilot',
+  cloudStatus: 'cloud:status',
+  cloudSetSecret: 'cloud:setSecret',
+  cloudClearSecret: 'cloud:clearSecret',
+  cloudTest: 'cloud:test',
+  cloudStart: 'cloud:start',
+  cloudSessions: 'cloud:sessions',
+  cloudAttach: 'cloud:attach',
+  cloudLeave: 'cloud:leave',
+  cloudEnd: 'cloud:end',
+  cloudDiff: 'cloud:diff',
+  cloudPush: 'cloud:push',
+  cloudPr: 'cloud:pr',
   /** Main to renderer only. */
   event: 'agent:event',
 } as const

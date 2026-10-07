@@ -7,6 +7,8 @@ const Rule = z.object({
   prefix: z.string().min(1).optional(),
 })
 
+const SecretName = z.enum(['cloud-token', 'github-token'])
+
 const nothing = z.undefined().or(z.null()).or(z.object({}))
 
 /** Payload schema for every invokable channel. Anything else is rejected before it reaches the backend. */
@@ -45,6 +47,7 @@ export const IPC_SCHEMAS = {
         extraDirs: z.array(z.string()),
         theme: z.enum(['ai', 'studios']),
         showDetails: z.boolean(),
+        cloud: z.object({ workerUrl: z.string().max(500), autoPush: z.boolean() }).partial(),
       })
       .partial()
       .strict(),
@@ -59,6 +62,26 @@ export const IPC_SCHEMAS = {
   [IPC.auditRead]: nothing,
   [IPC.spark]: nothing,
   [IPC.autopilot]: z.object({ on: z.boolean() }),
+  [IPC.cloudStatus]: nothing,
+  [IPC.cloudSetSecret]: z.object({ name: SecretName, value: z.string().trim().min(1).max(4096) }),
+  [IPC.cloudClearSecret]: z.object({ name: SecretName }),
+  [IPC.cloudTest]: nothing,
+  [IPC.cloudStart]: z.object({
+    repo: z.string().trim().min(1).max(300),
+    baseBranch: z.string().trim().min(1).max(200).optional(),
+    name: z.string().trim().max(60).optional(),
+  }),
+  [IPC.cloudSessions]: nothing,
+  [IPC.cloudAttach]: z.object({ id: z.string().min(1).max(200) }),
+  [IPC.cloudLeave]: nothing,
+  [IPC.cloudEnd]: z.object({ id: z.string().min(1).max(200) }),
+  [IPC.cloudDiff]: nothing,
+  [IPC.cloudPush]: nothing,
+  [IPC.cloudPr]: z.object({
+    title: z.string().trim().min(1).max(256),
+    body: z.string().max(60_000).optional(),
+    draft: z.boolean().optional(),
+  }),
 } as const
 
 export type IpcSchemas = typeof IPC_SCHEMAS

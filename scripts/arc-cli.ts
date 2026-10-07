@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { parseArgs } from 'node:util'
 import { BackendApp } from '../src/main/backend'
-import type { Cipher, KeyStore } from '../src/main/store/secrets'
+import { MemoryKeyStore, type Cipher, type KeyStore } from '../src/main/store/secrets'
 import type { AgentEvent, ApprovalDecision, PermissionMode } from '../src/shared/types'
 
 const USAGE = `Usage: npm run arc -- --project <dir> [--mode ask|auto-edit|auto] [--model <id>] [--verbose] "<prompt>"
@@ -40,15 +40,7 @@ const fail = (message: string, code: number): never => {
 }
 
 /** The harness never writes the key to disk. */
-function memoryKeyStore(): KeyStore {
-  let key: string | null = null
-  return {
-    setApiKey: async (k) => void (key = k.trim()),
-    getApiKey: async () => key,
-    hasApiKey: async () => key !== null,
-    clear: async () => void (key = null),
-  }
-}
+const memoryKeyStore = (): KeyStore => new MemoryKeyStore()
 
 const unusedCipher: Cipher = {
   isAvailable: () => false,

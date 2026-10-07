@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { realpath, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { CloudSessionInfo } from '../shared/cloud'
 import type {
   AgentEvent,
   AllowRule,
@@ -69,6 +70,8 @@ export interface BackendStatus {
   busy: boolean
   mode: PermissionMode | null
   sessionId: string | null
+  /** Set by the router while attached to a cloud session. */
+  cloud?: CloudSessionInfo | null
 }
 
 export interface ConnectionResult {
@@ -299,6 +302,11 @@ export class BackendApp {
     this.emit({ type: 'mode', mode: agent.mode })
     this.pushChanges()
     return { root, sessionId: handle.id, history }
+  }
+
+  /** The open conversation as the model sees it (used to rebuild the screen). */
+  getHistory(): Content[] {
+    return (this.project?.agent.getHistory() ?? []) as Content[]
   }
 
   async listSessions(): Promise<SessionMeta[]> {

@@ -74,4 +74,12 @@ describe('SettingsStore', () => {
     await new SettingsStore(dir).save({ maxSteps: 11 })
     expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([])
   })
+
+  it('has cloud defaults and merges cloud patches without losing the other cloud field', async () => {
+    const store = new SettingsStore(dir)
+    expect((await store.load()).cloud).toEqual({ workerUrl: '', autoPush: true })
+    await store.save({ cloud: { workerUrl: 'https://arc.example.run.app' } })
+    const saved = await store.save({ cloud: { autoPush: false } })
+    expect(saved.cloud).toEqual({ workerUrl: 'https://arc.example.run.app', autoPush: false })
+  })
 })

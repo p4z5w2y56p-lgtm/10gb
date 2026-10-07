@@ -10,6 +10,11 @@ const PrompterSchema = z.object({
   tokenBudget: z.number().int().min(1000).default(200_000),
 })
 
+const CloudSchema = z.object({
+  workerUrl: z.string().trim().max(500).default(''),
+  autoPush: z.boolean().default(true),
+})
+
 export const SettingsSchema = z.object({
   /** Coder model id. */
   model: z.string().trim().min(1).default(DEFAULT_MODEL),
@@ -26,10 +31,14 @@ export const SettingsSchema = z.object({
   extraDirs: z.array(z.string()).default([]),
   theme: z.enum(['ai', 'studios']).default('ai'),
   showDetails: z.boolean().default(false),
+  cloud: CloudSchema.default({ workerUrl: '', autoPush: true }),
 })
 
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsPatch = Partial<Omit<Settings, 'prompter'>> & { prompter?: Partial<Settings['prompter']> }
+export type SettingsPatch = Partial<Omit<Settings, 'prompter' | 'cloud'>> & {
+  prompter?: Partial<Settings['prompter']>
+  cloud?: Partial<Settings['cloud']>
+}
 
 export const DEFAULT_SETTINGS: Settings = SettingsSchema.parse({})
 
@@ -64,6 +73,7 @@ export class SettingsStore {
         ...current,
         ...patch,
         prompter: { ...current.prompter, ...patch.prompter },
+        cloud: { ...current.cloud, ...patch.cloud },
       })
       await atomicWrite(this.file, JSON.stringify(merged, null, 2))
       return merged
