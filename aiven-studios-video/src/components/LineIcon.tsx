@@ -12,8 +12,8 @@ const PATHS: Record<string, React.ReactNode> = {
   cpu: (
     <>
       <rect x={6} y={6} width={12} height={12} rx={2} />
-      <rect x={9.5} y={9.5} width={5} height={5} />
-      <path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" />
+      <rect x={9.5} y={9.5} width={5} height={5} rx={1} />
+      <path d="M9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3" />
     </>
   ),
   crm: (
@@ -35,7 +35,13 @@ const PATHS: Record<string, React.ReactNode> = {
       <path d="M7.5 12.5l3 3 6-6.5" />
     </>
   ),
-  arrow: <path d="M4 12h16M14 6l6 6-6 6" />,
+  arrow: <path d="M4 12h15M13 6l6 6-6 6" />,
+  terminal: (
+    <>
+      <rect x={3} y={5} width={18} height={14} rx={2.5} />
+      <path d="M7 10l3 2-3 2M12.5 15H17" />
+    </>
+  ),
 };
 
 export const LineIcon: React.FC<{

@@ -1,37 +1,43 @@
-# AIVEN STUDIOS — promo video
+# AIVEN STUDIOS — promo edit
 
-A 34-second, 1920×1080, 60fps motion piece for AIVEN STUDIOS, in Dutch, built with Remotion and styled to the
-*AIVEN STUDIOS — Stijlgids voor AI*: monochrome, Manrope uppercase headlines, JetBrains Mono labels,
-cuts on a 120 BPM clock (one beat = 30 frames).
+A 28-second, 1920×1080, 60fps edit for AIVEN STUDIOS, in Dutch, built with Remotion on the
+**Aiven Studios** Claude Design system: Paper and Black grounds alternating on every cut,
+flush-left Manrope headlines with a full stop, JetBrains Mono labels, one red accent per scene,
+and every cut and hit locked to **168 BPM** (one beat = 0.357 s, `b(n)` in `src/brand.ts`).
 
-| # | Scene | Beats | What happens |
-|---|-------|-------|--------------|
-| 00 | Hook | 8 | MINDER HANDWERK. → MEER GROEI. |
-| — | Logo | 8 | Monogram blur-to-sharp, wordmark, services label |
-| 01 | AI-integratie | 12 | Statement, then a live assistant terminal |
-| 02 | Automatisering | 12 | Statement, then a lead → AI → CRM → mail pipeline, 24/7 |
-| 03 | Websites | 12 | Statement, then a site building itself in a browser and phone |
-| 04 | Waarom | 8 | Inverted X-ray chapter: SLIM. SNEL. OP MAAT. |
-| — | Outro | 8 | LATEN WE PRATEN. → SHAPING THE INEVITABLE. → hard cut to logo, silent hold |
+| Beats | Scene | Ground |
+|-------|-------|--------|
+| 0–4 | MINDER HANDWERK. | Black |
+| 4–8 | MEER GROEI. (red full stop) | Paper |
+| 8–14 | Drop: monogram slam, reticle locks red, wordmark | Black |
+| 14–18 | 01 / AI-INTEGRATIE — AI DIE MEEWERKT. | Paper |
+| 18–24 | Assistant terminal, one line per beat, reticle locks on `[OK]` | Black |
+| 24–28 | 02 / AUTOMATISERING — ALLES AUTOMATISCH. | Paper |
+| 28–34 | LEES. DENK. DOE. step panels light per beat | Black |
+| 34–38 | Proof cards: 24/7 · 1 · 0 | Paper |
+| 38–42 | 03 / WEBSITES — SITES DIE VERKOPEN. | Black |
+| 42–50 | A site builds itself per beat; CTA press in red; phone | Paper |
+| 50–54 | SLIM. / SNEL. / OP MAAT. — one word per beat | Black/Paper/Black |
+| 54–60 | GEEN ONNODIGE RUIS. — the full stop grows into the black hole | Black |
+| 60–66 | LATEN WE PRATEN. + pill (pressed red) + AIVENSTUDIOS.COM | Paper |
+| 66–70 | SHAPING THE INEVITABLE. | Black |
+| 70–78 | Wordmark alone, silent hold | Black |
 
-## Logo files
+Each scene is also its own composition under `AivenStudios-Scenes` in the Studio.
 
-The video only uses the official logo files (from the AIVEN STUDIOS design-system artifact) and never redraws them:
+## Brand assets
 
-```
-public/brand/monogram-white.png   monogram-black.png   (1415 × 1118)
-public/brand/wordmark-white.png   wordmark-black.png   (1948 × 295)
-```
-
-White files on the dark ground, black on paper. The end card is the wordmark alone on a silent hold.
+From the Aiven Studios design-system artifact, used as supplied (never recoloured or redrawn):
+`public/brand/{monogram,wordmark}-{white,black}.png` and `public/brand/blackhole.jpg`.
+Fonts are bundled in `public/fonts` (SIL OFL), so rendering needs no network access.
 
 ## Commands
 
 ```console
 npm i
-npm run dev                                  # preview in Remotion Studio
+npm run dev                                   # preview in Remotion Studio
 npx remotion render AivenStudios out/aiven-studios.mp4
-python3 scripts/generate_audio.py            # regenerate music bed + SFX in public/audio
+python3 scripts/generate_audio.py             # regenerate the 168 BPM bed + SFX
 ```
 
-Fonts are bundled in `public/fonts` (SIL OFL, via Fontsource), so rendering needs no network access.
+The music bed is synthesised as a placeholder; swap in a licensed track at 168 BPM for release.

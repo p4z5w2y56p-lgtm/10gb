@@ -1,7 +1,9 @@
 """Synthesise the music bed and SFX for the AIVEN STUDIOS video.
 
 Run: python3 scripts/generate_audio.py  (writes public/audio/*)
-Music is locked to the video clock: 120 BPM, one beat = 0.5 s = 30 frames at 60fps.
+Music is locked to the video clock: 168 BPM (design system), one beat = 0.357 s.
+Sections (beats): 0-8 build, 8 drop, 50-54 word hits, 54-60 black-hole breakdown,
+60-70 final run, 70+ silence for the end card.
 """
 
 import os
@@ -10,7 +12,7 @@ import wave
 import numpy as np
 
 SR = 44100
-BEAT = 0.5
+BEAT = 60 / 168
 OUT = os.path.join(os.path.dirname(__file__), "..", "public", "audio")
 rng = np.random.default_rng(7)
 
@@ -111,49 +113,62 @@ def place(track, sound, at, gain=1.0):
         track[start:end] += sound[: end - start] * gain
 
 
+def riser(beats, top=7000, power=2):
+    rt = t(beats * BEAT)
+    x = rt / rt[-1]
+    return onepole_lowpass(rng.standard_normal(len(rt)), 250 + top * x ** power) * x ** 2
+
+
 def music():
-    total_beats = 68
-    hard_cut = 66  # outro hard cut to logo: silence from here
+    total_beats = 78
+    hard_cut = 70  # end card: silent hold from here
     track = np.zeros(int(SR * total_beats * BEAT))
     roots = [55.0, 43.65, 65.41, 49.0]  # A, F, C, G (one bar each)
 
-    # Intro: 40 Hz drone for weight, quiet ticks, riser into the drop on beat 8
-    tt = t(8 * BEAT)
-    drone = np.sin(2 * np.pi * 40 * tt) * np.minimum(1, tt / 1.5) * 0.35
+    def groove(b0, b1, bass=True, clap_every=2):
+        for bt in range(b0, b1):
+            at = bt * BEAT
+            place(track, kick(), at, 0.95)
+            place(track, hat(), at + BEAT / 2, 0.32)
+            place(track, hat(), at + BEAT / 4, 0.12)
+            place(track, hat(), at + 3 * BEAT / 4, 0.12)
+            if bt % clap_every == 1:
+                place(track, clap(), at, 0.5)
+            if bass:
+                root = roots[(bt // 4) % 4]
+                for half in (0, 1):
+                    nt = t(BEAT / 2)
+                    duck = 1 - 0.85 * np.exp(-nt * 40) if half == 0 else np.ones_like(nt)
+                    note = np.sin(2 * np.pi * root * nt) + 0.35 * np.sin(4 * np.pi * root * nt)
+                    place(track, note * duck * np.exp(-nt * 4), at + half * BEAT / 2, 0.5)
+        for bar in range(b0, b1, 4):
+            root = roots[(bar // 4) % 4] * 4
+            pt = t(4 * BEAT)
+            pad = sum(np.sin(2 * np.pi * root * r * pt) for r in (1, 1.189, 1.498))
+            place(track, pad * np.exp(-pt * 1.6) * 0.1, bar * BEAT)
+
+    # 0-8 build: 40 Hz drone, ticking hats, snare roll and riser into the drop
+    drone = np.sin(2 * np.pi * 40 * t(8 * BEAT)) * np.minimum(1, t(8 * BEAT) / 1.0) * 0.4
     place(track, drone, 0)
-    for b in range(8):
-        place(track, hat(), b * BEAT + BEAT / 2, 0.15)
-    rt = t(2 * BEAT)
-    riser = onepole_lowpass(rng.standard_normal(len(rt)), 200 + 6000 * (rt / rt[-1]) ** 2) * (rt / rt[-1]) ** 2
-    place(track, riser, 6 * BEAT, 0.5)
+    for bt in range(8):
+        place(track, hat(), bt * BEAT + BEAT / 2, 0.18)
+    for i in range(16):  # 16th-note clap roll over beats 4-8, getting louder
+        place(track, clap(), (4 + i / 4) * BEAT, 0.12 + 0.3 * i / 15)
+    place(track, riser(4), 4 * BEAT, 0.5)
 
-    # Drop: beats 8..hard_cut
-    for b in range(8, hard_cut):
-        at = b * BEAT
-        place(track, kick(), at, 0.9)
-        place(track, hat(), at + BEAT / 2, 0.3)
-        if b >= 52 and b % 2 == 1:
-            place(track, clap(), at, 0.5)
-        bar = (b // 4) % 4
-        for half in (0, 1):
-            nt = t(BEAT / 2)
-            duck = 1 - 0.85 * np.exp(-nt * 30) if half == 0 else np.ones_like(nt)
-            note = np.sin(2 * np.pi * roots[bar] * nt) + 0.3 * np.sin(4 * np.pi * roots[bar] * nt)
-            place(track, note * duck * np.exp(-nt * 3), at + half * BEAT / 2, 0.45)
+    groove(8, 50)
+    for bt in (50, 51, 52, 53):  # word hits: kick + clap, no bass
+        place(track, kick(), bt * BEAT, 1.0)
+        place(track, clap(), bt * BEAT, 0.45)
 
-    # Pad stabs on every bar, a minor-ish voicing two octaves up
-    for bar_start in range(8, hard_cut, 4):
-        root = roots[(bar_start // 4) % 4] * 4
-        pt = t(4 * BEAT)
-        pad = sum(np.sin(2 * np.pi * root * r * pt) for r in (1, 1.189, 1.498))
-        place(track, pad * np.exp(-pt * 1.4) * 0.12, bar_start * BEAT)
+    # 54-60 black hole: sub swell, reveal on 57, riser back in
+    place(track, np.sin(2 * np.pi * 36 * t(6 * BEAT)) * np.minimum(1, t(6 * BEAT) / 0.6) * 0.45, 54 * BEAT)
+    place(track, riser(2, top=5000), 58 * BEAT, 0.5)
 
-    # Riser cutting into silence at the hard cut
-    rt = t(3 * BEAT)
-    riser = onepole_lowpass(rng.standard_normal(len(rt)), 300 + 8000 * (rt / rt[-1]) ** 3) * (rt / rt[-1]) ** 2
-    place(track, riser, (hard_cut - 3) * BEAT, 0.6)
+    groove(60, 68)
+    place(track, riser(2, top=9000, power=3), 68 * BEAT, 0.65)
     track[int(hard_cut * BEAT * SR):] = 0
-    return np.tanh(track * 1.2)
+    return np.tanh(track * 1.1)
 
 
 if __name__ == "__main__":
