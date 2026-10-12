@@ -58,3 +58,19 @@ free to publish commercially with credit. Put this in the post description:
 > Music: "Unknown" by Tanner Helland (tannerhelland.com), licensed under CC BY 4.0.
 
 Details in `public/audio/CREDITS.md`. Fonts in `public/fonts` are bundled locally, so rendering needs no network.
+
+## v3 — own take on the reference (`AivenStudiosV3`)
+
+A separate 28.8 s composition in `src/v3/` that takes the reference's grammar (terminal boot, a visual per
+capability, wireframe terrain, marquee, launch arrow, slogan over the black hole) and builds its own objects
+and Dutch copy: neural sphere (AI), noise-to-grid (automation), isometric site stack (websites), terrain
+targeting, red launch arrow. Cut to bars 30–44 of the same track (beat 0 = 55.6 s, peak at beat 24,
+hard cut to the wordmark at beat 56). It does not touch the files of the other composition.
+
+```console
+python3 scripts/generate_sfx_v3.py            # whoosh / impact / click / keys -> public/audio/v3
+npx remotion render AivenStudiosV3 out/aiven-studios-v3.mp4 --crf=18 --audio-bitrate=320k
+```
+
+`public/audio/v3/music.wav` is cut from "Unknown" with the same `ffmpeg` filter as `scripts/prepare_music.sh`
+but `-ss 55.594 -t 25.931` (credit as above).
