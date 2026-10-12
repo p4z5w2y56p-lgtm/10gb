@@ -42,7 +42,7 @@ export const LogoScene: React.FC = () => {
             }),
           }}
         >
-          <BrandLogo file="as-monogram.png" width={430} height={366} />
+          <BrandLogo mark="monogram" width={440} />
         </Interactive.Div>
 
         <Interactive.Div
@@ -67,7 +67,7 @@ export const LogoScene: React.FC = () => {
             }),
           }}
         >
-          <BrandLogo file="wordmark.png" width={1000} height={200} />
+          <BrandLogo mark="wordmark" width={1040} />
         </Interactive.Div>
       </AbsoluteFill>
 

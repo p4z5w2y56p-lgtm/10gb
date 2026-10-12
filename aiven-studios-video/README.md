@@ -16,15 +16,14 @@ cuts on a 120 BPM clock (one beat = 30 frames).
 
 ## Logo files
 
-The video only uses the official logo files and never redraws them. Put them here:
+The video only uses the official logo files (from the AIVEN STUDIOS design-system artifact) and never redraws them:
 
 ```
-public/brand/as-monogram.png
-public/brand/wordmark.png
+public/brand/monogram-white.png   monogram-black.png   (1415 × 1118)
+public/brand/wordmark-white.png   wordmark-black.png   (1948 × 295)
 ```
 
-(From Drive: AIVEN STUDIOS / Aiven Studios Matthijs / Aiven assests / Logos.) The black art is
-inverted to white on the dark ground automatically. Until the files exist, a dashed empty slot holds their place.
+White files on the dark ground, black on paper. The end card is the wordmark alone on a silent hold.
 
 ## Commands
 

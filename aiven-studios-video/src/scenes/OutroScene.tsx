@@ -1,6 +1,5 @@
 import React from "react";
-import { AbsoluteFill, Easing, Interactive, interpolate, Sequence, staticFile, useCurrentFrame } from "remotion";
-import { Audio } from "@remotion/media";
+import { AbsoluteFill, Easing, Interactive, interpolate, Sequence, useCurrentFrame } from "remotion";
 import { Background } from "../components/Background";
 import { BrandLogo } from "../components/BrandLogo";
 import { WordReveal } from "../components/WordReveal";
@@ -50,10 +49,9 @@ export const OutroScene: React.FC = () => {
       </Sequence>
 
       <Sequence from={HARD_CUT} layout="absolute-fill">
-        <AbsoluteFill style={{ backgroundColor: "#000000", justifyContent: "center", alignItems: "center", flexDirection: "column", gap: 56 }}>
-          <Audio src={staticFile("audio/impact.wav")} volume={0.7} />
-          <BrandLogo file="as-monogram.png" width={300} height={256} />
-          <BrandLogo file="wordmark.png" width={760} height={150} />
+        {/* End card: the wordmark centred and alone, on a silent hold */}
+        <AbsoluteFill style={{ backgroundColor: "#000000", justifyContent: "center", alignItems: "center" }}>
+          <BrandLogo mark="wordmark" width={1160} />
         </AbsoluteFill>
       </Sequence>
     </AbsoluteFill>
