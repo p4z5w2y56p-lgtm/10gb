@@ -15,7 +15,7 @@ const ease = (frame: number, a: number, z: number, from: number, to: number) =>
     easing: Easing.bezier(0.16, 1, 0.3, 1),
   });
 
-/** The drop: monogram slams in, reticle locks on (accent), wordmark follows. 6 beats. */
+/** The drop: monogram slams in, reticle locks on (accent), wordmark follows. 4 beats. */
 export const LogoDrop: React.FC = () => {
   const frame = useCurrentFrame();
   const lift = ease(frame, b(2), b(2) + 14, 0, 1);
@@ -59,13 +59,13 @@ export const LogoDrop: React.FC = () => {
         </div>
       </AbsoluteFill>
       <div style={{ position: "absolute", left: 0, right: 0, bottom: 90, display: "flex", justifyContent: "center" }}>
-        <ScrambleLabel text="AI-INTEGRATIE / AUTOMATISERING / WEBSITES" delay={b(4)} color={C.mutedOnDark} />
+        <ScrambleLabel text="AI-INTEGRATIE / AUTOMATISERING / WEBSITES" delay={b(2.5)} color={C.mutedOnDark} />
       </div>
     </Ground>
   );
 };
 
-/** The assistant at work: one terminal line per beat, reticle locks on the result. 6 beats. */
+/** The assistant at work: one terminal line per beat, reticle locks on the result. 4 beats. */
 export const AiTerminal: React.FC = () => {
   const frame = useCurrentFrame();
   const p = ease(frame, 0, 12, 0, 1);
@@ -73,15 +73,15 @@ export const AiTerminal: React.FC = () => {
     <Ground theme="black" label="AIVEN // ASSISTENT" counter="01 / 03" grid>
       <AbsoluteFill style={{ justifyContent: "center", alignItems: "center" }}>
         <div style={{ position: "relative", padding: 40, opacity: p, translate: `0px ${(1 - p) * 60}px`, filter: `blur(${(1 - p) * 12}px)` }}>
-          <Corners w={1320} h={560} color={frame >= b(5) ? C.accent : C.white} />
+          <Corners w={1320} h={560} color={frame >= b(3) ? C.accent : C.white} />
           <Terminal
             title="aiven@studios: ~/assistent"
             lines={[
-              { at: 1, text: "$ aiven scan --inbox" },
-              { at: 2, text: "> 48 berichten gelezen", muted: true },
-              { at: 3, text: "> 12 offerte-aanvragen herkend", muted: true },
-              { at: 4, text: "> 3 met prioriteit naar het CRM", muted: true },
-              { at: 5, text: "[OK]   klanten beantwoord in 40s" },
+              { at: 0.5, text: "$ aiven scan --inbox" },
+              { at: 1, text: "> 48 berichten gelezen", muted: true },
+              { at: 1.5, text: "> 12 offerte-aanvragen herkend", muted: true },
+              { at: 2, text: "> 3 met prioriteit naar het CRM", muted: true },
+              { at: 2.5, text: "[OK]   klanten beantwoord in 40s" },
             ]}
           />
         </div>
@@ -90,7 +90,7 @@ export const AiTerminal: React.FC = () => {
   );
 };
 
-/** LEES. DENK. DOE. — one panel lights per beat, the last inverts. 6 beats. */
+/** LEES. DENK. DOE. — one panel lights per beat, the last inverts. 4 beats. */
 export const AutoSteps: React.FC = () => (
   <Ground theme="black" label="AIVEN // PROCESS" counter="02 / 03">
     <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", flexDirection: "row", gap: 40 }}>
@@ -99,7 +99,7 @@ export const AutoSteps: React.FC = () => (
       <StepPanel n="03" word="DOE." icon="arrow" enterAt={0} litAt={3} inverted />
     </AbsoluteFill>
     <div style={{ position: "absolute", left: 0, right: 0, bottom: 70, display: "flex", justifyContent: "center" }}>
-      <ScrambleLabel text="ALL SYSTEMS NOMINAL" delay={b(4)} fontSize={22} weight={500} color={C.mutedOnDark} />
+      <ScrambleLabel text="ALL SYSTEMS NOMINAL" delay={b(3)} fontSize={22} weight={500} color={C.mutedOnDark} />
     </div>
   </Ground>
 );

@@ -6,11 +6,11 @@ import { Ground } from "../components/Ground";
 import { Statement } from "../components/Statement";
 import "../fonts";
 
-// Scene lengths are in beats (168 BPM). Copy: Dutch, uppercase, full stops.
+// Scene lengths are in beats of the track (129.59 BPM). Copy: Dutch, uppercase, full stops.
 
 export const HookA: React.FC = () => (
   <Ground theme="black" label="AIVEN // BOOT" counter="00 / 06" grid>
-    <Statement theme="black" eyebrow="00 / INITIALIZE" size={230} lines={[{ text: "Minder", at: 1 }, { text: "handwerk.", at: 2 }]} />
+    <Statement theme="black" eyebrow="00 / INITIALIZE" size={230} lines={[{ text: "Minder", at: 0 }, { text: "handwerk.", at: 1 }]} />
   </Ground>
 );
 
@@ -27,7 +27,6 @@ export const AiStatement: React.FC = () => (
       eyebrow="01 / AI-INTEGRATIE"
       size={230}
       lines={[{ text: "AI die", at: 0 }, { text: "meewerkt.", at: 1 }]}
-      lead="Assistenten die je CRM, mail en agenda kennen."
     />
   </Ground>
 );
@@ -39,7 +38,6 @@ export const AutoStatement: React.FC = () => (
       eyebrow="02 / AUTOMATISERING"
       size={210}
       lines={[{ text: "Alles", at: 0 }, { text: "automatisch.", at: 1 }]}
-      lead="Repetitief werk draait voortaan vanzelf."
     />
   </Ground>
 );
@@ -51,7 +49,6 @@ export const WebStatement: React.FC = () => (
       eyebrow="03 / WEBSITES"
       size={230}
       lines={[{ text: "Sites die", at: 0 }, { text: "verkopen.", at: 1 }]}
-      lead="Snel, strak en gebouwd om te converteren."
     />
   </Ground>
 );

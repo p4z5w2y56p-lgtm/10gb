@@ -21,9 +21,9 @@ export type Theme = "paper" | "black";
 export const themeText = (t: Theme) => (t === "paper" ? C.ink : C.white);
 export const themeMuted = (t: Theme) => (t === "paper" ? C.mutedOnPaper : C.mutedOnDark);
 
-// Music clock: 168 BPM at 60fps -> one beat = 21.43 frames.
+// Music clock: "Unknown" by Tanner Helland runs at 129.59 BPM -> one beat = 27.78 frames at 60fps.
 export const FPS = 60;
-export const BPM = 168;
+export const BPM = 129.59;
 export const BEAT = (FPS * 60) / BPM;
 /** Frame of beat n (rounded, so cuts land on the nearest frame). */
 export const b = (n: number) => Math.round(n * BEAT);

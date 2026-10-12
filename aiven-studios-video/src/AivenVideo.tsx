@@ -1,7 +1,7 @@
 import React from "react";
-import { AbsoluteFill, interpolate, random, Sequence, staticFile, useCurrentFrame } from "remotion";
+import { AbsoluteFill, interpolate, Sequence, staticFile, useCurrentFrame } from "remotion";
 import { Audio } from "@remotion/media";
-import { b, BEAT, C } from "./brand";
+import { b, C } from "./brand";
 import {
   AiStatement,
   AutoStatement,
@@ -18,68 +18,57 @@ import { AiTerminal, AutoSteps, LogoDrop, Proof } from "./scenes/ShowcaseScenes"
 import { WebBuild } from "./scenes/WebBuild";
 import { BlackHole, Cta } from "./scenes/FinaleScenes";
 
-// [component, name, start beat, length in beats] — every cut lands on a beat (168 BPM).
+// [component, name, start beat, length in beats] — every cut lands on a beat of the track.
+// Edit beat 0 = bar 30 of "Unknown" (55.6 s); the track's peak starts at beat 24 and
+// falls away at beat 56, exactly where the hard cut to the end card lands.
 export const TIMELINE: [React.FC, string, number, number][] = [
-  [HookA, "Hook: minder handwerk", 0, 4],
-  [HookB, "Hook: meer groei", 4, 4],
-  [LogoDrop, "Drop: logo", 8, 6],
-  [AiStatement, "01 AI-integratie", 14, 4],
-  [AiTerminal, "01 Terminal", 18, 6],
-  [AutoStatement, "02 Automatisering", 24, 4],
-  [AutoSteps, "02 Lees denk doe", 28, 6],
-  [Proof, "02 Proof", 34, 4],
-  [WebStatement, "03 Websites", 38, 4],
-  [WebBuild, "03 Build", 42, 8],
-  [WordSlim, "Slim", 50, 1],
-  [WordSnel, "Snel", 51, 1],
-  [WordOpMaat, "Op maat", 52, 2],
-  [BlackHole, "Geen onnodige ruis", 54, 6],
-  [Cta, "Laten we praten", 60, 6],
-  [Slogan, "Shaping the inevitable", 66, 4],
-  [EndCard, "End card", 70, 8],
+  [HookA, "Hook: minder handwerk", 0, 2],
+  [HookB, "Hook: meer groei", 2, 2],
+  [LogoDrop, "Drop: logo", 4, 4],
+  [AiStatement, "01 AI-integratie", 8, 2],
+  [AiTerminal, "01 Terminal", 10, 4],
+  [AutoStatement, "02 Automatisering", 14, 2],
+  [AutoSteps, "02 Lees denk doe", 16, 4],
+  [Proof, "02 Proof", 20, 4],
+  [WebStatement, "03 Websites", 24, 2],
+  [WebBuild, "03 Build", 26, 8],
+  [WordSlim, "Slim", 34, 1],
+  [WordSnel, "Snel", 35, 1],
+  [WordOpMaat, "Op maat", 36, 2],
+  [BlackHole, "Geen onnodige ruis", 38, 6],
+  [Cta, "Laten we praten", 44, 6],
+  [Slogan, "Shaping the inevitable", 50, 6],
+  [EndCard, "End card", 56, 6],
 ];
-export const TOTAL_BEATS = 78;
+export const TOTAL_BEATS = 62;
 
-// [sound, beat, volume]
+// Sparse SFX that follow visible actions; the track carries the rhythm. [sound, beat, volume]
 const SFX: [string, number, number][] = [
-  ["whoosh", 4, 0.5], ["impact", 8, 0.9], ["whoosh", 14, 0.4],
-  ["keys", 19, 0.5], ["keys", 20, 0.5], ["keys", 21, 0.5], ["keys", 22, 0.5], ["click", 23, 0.8],
-  ["whoosh", 24, 0.4], ["click", 29, 0.7], ["click", 30, 0.7], ["click", 31, 0.9],
-  ["click", 34, 0.6], ["click", 35, 0.6], ["click", 36, 0.6], ["whoosh", 38, 0.4],
-  ["click", 43, 0.5], ["click", 44, 0.5], ["click", 45, 0.5], ["click", 47, 0.9], ["whoosh", 48, 0.4],
-  ["impact", 50, 0.45], ["impact", 51, 0.45], ["impact", 52, 0.6], ["impact", 57, 0.9],
-  ["whoosh", 60, 0.4], ["click", 64, 0.9], ["whoosh", 66, 0.4],
+  ["impact", 4, 0.6],
+  ["keys", 10.5, 0.35], ["keys", 11.5, 0.35], ["click", 12.5, 0.5],
+  ["click", 17, 0.45], ["click", 18, 0.45], ["click", 19, 0.6],
+  ["click", 31, 0.6],
+  ["impact", 41, 0.6],
+  ["click", 48, 0.6],
 ];
 
-const FLASHES = [8, 50, 51, 52, 60];
-
-/** Decaying noise shake on every kick, from the drop to the hard cut. */
-const useKickShake = () => {
-  const frame = useCurrentFrame();
-  const beat = Math.floor(frame / BEAT);
-  if (frame < b(8) || frame >= b(70) || (frame >= b(54) && frame < b(57))) {
-    return "0px 0px";
-  }
-  const t = frame - b(beat);
-  const amp = 7 * Math.exp(-t / 4);
-  return `${(random(`kx${beat}`) - 0.5) * 2 * amp}px ${(random(`ky${beat}`) - 0.5) * 2 * amp}px`;
-};
+// Soft white flashes only on the two big lifts of the track.
+const FLASHES = [4, 24];
 
 export const AivenVideo: React.FC = () => {
   const frame = useCurrentFrame();
-  const shake = useKickShake();
   const flash = Math.max(
     0,
-    ...FLASHES.map((at) => interpolate(frame, [b(at), b(at) + 5], [0.85, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }) * (frame >= b(at) ? 1 : 0)),
+    ...FLASHES.map((at) => interpolate(frame, [b(at), b(at) + 5], [0.45, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }) * (frame >= b(at) ? 1 : 0)),
   );
 
   return (
     <AbsoluteFill style={{ backgroundColor: C.black }}>
-      <Audio src={staticFile("audio/music.wav")} volume={0.6} />
+      <Audio src={staticFile("audio/music.wav")} volume={1} />
       {SFX.map(([name, at, volume]) => (
-        <Audio key={`${name}${at}`} src={staticFile(`audio/${name}.wav`)} from={b(at)} volume={volume * 0.7} />
+        <Audio key={`${name}${at}`} src={staticFile(`audio/${name}.wav`)} from={b(at)} volume={volume * 0.5} />
       ))}
-      <AbsoluteFill style={{ translate: shake, scale: "1.02" }}>
+      <AbsoluteFill>
         {TIMELINE.map(([Scene, name, start, beats]) => (
           <Sequence key={name} name={name} from={b(start)} durationInFrames={b(start + beats) - b(start)}>
             <Scene />
